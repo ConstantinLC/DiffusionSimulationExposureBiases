@@ -50,8 +50,8 @@ class KolmogorovDataset_Rozet(Dataset):
         if self.limit_trajectories is not None:
             self.n_trajectories = min(self.n_trajectories, self.limit_trajectories)
         self.n_frames = self.data.shape[1] - self.seqLength + 1  # Ignore timestep for now
-          
 
+        
     def __len__(self) -> int:
         return self.n_trajectories * self.n_frames
 
