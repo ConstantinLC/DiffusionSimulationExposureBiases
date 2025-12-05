@@ -1,0 +1,48 @@
+{
+    "train_params": {
+        "num_epochs": 1000,
+        "learning_rate": 0.00001,
+        "device": "cuda",
+        "channels_per_frame": 2,
+        "epoch_sampling_frequency": 20,
+        "first_ar_step_noising_step_limit": 5,
+        "backgrad": false,
+        "n_proxy_steps": 2
+    },
+    "data_params": {
+        "dataset_name": "KolmogorovFlow",
+        "data_path": "/mnt/SSD2/constantin/sda/data",
+        "resolution": 64,
+        "sequence_length": [8, 1],
+        "trajectory_sequence_length": [64, 1],
+        "frames_per_time_step": 1,
+        "limit_trajectories_train": 819,
+        "limit_trajectories_val": 102,
+        "batch_size": 64
+    },
+    "loss_params": {
+        "name": "mse",
+        "image_size": [64, 64],
+        "eval_traj_metric": "vorticity_corr"
+    },
+    "model_params": {
+        "dimension": 2,
+        "dataSize": [64, 64],
+        "condChannels": 2,
+        "diffSchedule": "psd",
+        "diffSteps": 100,
+        "inferenceSamplingMode": "ddpm",
+        "inferenceConditioningIntegration": "clean",
+        "diffCondIntegration": "clean",
+        "x0_estimate_type": "mean",
+        "padding_mode": "circular",
+        "scheduled_sampling": false
+    },
+    "low_pass_target": false,
+    "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/run_253/best_model.pth",
+    "wandb_params": {
+        "project": "multi-steps-diffusion-training",
+        "entity": "cleclei",
+        "name": "dry-run"
+    }
+}

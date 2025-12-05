@@ -1,0 +1,20 @@
+name: optimal-freq
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  # Core ML and GPU dependencies
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1 # Specifies the CUDA toolkit version
+  # Other packages
+  - einops
+  - matplotlib
+  - numpy
+  - scipy
+  - wandb

@@ -1,0 +1,42 @@
+{
+    "train_params": {
+        "num_epochs": 1000,
+        "learning_rate": 0.0001,
+        "device": "cuda",
+        "epoch_sampling_frequency": 50
+    },
+    "data_params": {
+        "dataset_name": "TransonicFlow",
+        "data_path": "/mnt/SSD2/constantin/autoreg-pde-diffusion/data",
+        "resolution": 64,
+        "sequence_length": [2, 2],
+        "trajectory_sequence_length": [64, 1],
+        "frames_per_time_step": 1,
+        "limit_trajectories_train": -1,
+        "limit_trajectories_val": -1,
+        "batch_size": 64
+    },
+    "loss_params": {
+        "name": "mse",
+        "image_size": [64, 64],
+        "eval_traj_metric": "mse"
+    },
+    "model_params": {
+        "dimension": 2,
+        "dataSize": [128, 64],
+        "condChannels": 5,
+        "diffSchedule": "linear",
+        "diffSteps": 20,
+        "inferenceSamplingMode": "ddim",
+        "inferenceConditioningIntegration": "clean",
+        "diffCondIntegration": "clean",
+        "x0_estimate_type": "mean",
+        "padding_mode": "zeros"
+    },
+    "low_pass_target": false,
+    "wandb_params": {
+        "project": "multi-steps-diffusion-training",
+        "entity": "cleclei",
+        "name": "dry-run"
+    }
+}
