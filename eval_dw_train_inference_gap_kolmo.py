@@ -46,12 +46,12 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
             for name in models:
                 # Store prediction
                 model = models[name]
-                _, x0_estimates, _ = model(conditioning=conditioning_frame, data=target_frame)
-                _, x0_estimates_clean, _ = model(conditioning=conditioning_frame, data=target_frame, with_clean_input=True)
+                _, x0_estimates = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="ancestor")
+                _, x0_estimates_clean = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean")
 
-                mse_ancestor = [(torch.mean((x0_estimates[t].cpu() - target_frame)**2)).item()
+                mse_ancestor = [(torch.mean((x0_estimates[t] - target_frame)**2)).item()
                         for t in range(len(x0_estimates))]
-                mse_clean = [(torch.mean((x0_estimates_clean[t].cpu() - target_frame)**2)).item()
+                mse_clean = [(torch.mean((x0_estimates_clean[t] - target_frame)**2)).item()
                          for t in range(len(x0_estimates))]
 
                 mse_ancestor_all[name].append(mse_ancestor)
@@ -63,8 +63,8 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
     mean_mse_clean = {}
     for name in models:
         # Concatenate all batches along dimension 0
-        mean_mse_ancestor[name] = torch.mean(torch.cat(mse_ancestor_all[name], dim=0), dim=0)
-        mean_mse_clean[name] = torch.mean(torch.cat(mse_clean_all[name], dim=0), dim=0)
+        mean_mse_ancestor[name] = torch.mean(torch.tensor(mse_ancestor_all[name]), dim=0)
+        mean_mse_clean[name] = torch.mean(torch.tensor(mse_clean_all[name]), dim=0)
 
     return {
         "mse_ancestor": mean_mse_ancestor,   # (N_total, T, C, H, W)
@@ -88,7 +88,7 @@ def main():
     
     # Params
     parser.add_argument('--resolution', type=int, default=64)
-    parser.add_argument('--batch_size', type=int, default=50) 
+    parser.add_argument('--limit_val_trajectories', type=int, default=10) 
     parser.add_argument('--device', type=str, default='cuda')
 
     args = parser.parse_args()
@@ -110,8 +110,8 @@ def main():
         "trajectory_sequence_length": [64, 1], 
         "frames_per_time_step": 1,
         "limit_trajectories_train": 100,
-        "limit_trajectories_val": args.batch_size, 
-        "batch_size": args.batch_size
+        "limit_trajectories_val": args.limit_val_trajectories, 
+        "batch_size": 200
     }
     _, val_loader, _ = get_data_loaders(data_params)
 
@@ -146,5 +146,56 @@ def main():
     # 3. Evaluate train input vs inference input predictions
     results = evaluate_dw_train_inf_gap(models, val_loader, device='cuda')
 
-    
+    n_models = len(checkpoints_dict.items())
+    fig, axes = plt.subplots(2, n_models, figsize=(3*len(models), 6), sharex=True)
+
+    colors = ['purple', 'blue', 'red']
+
+    # --------------------
+    for i, model_name in enumerate(models):
+        mse_ancestor = results['mse_ancestor'][model_name]
+        mse_clean = results['mse_clean'][model_name]
+        alphas = list(models[model_name].sqrtOneMinusAlphasCumprod.ravel().cpu())[::-1]
+
+        axes[0,i].hist(alphas, alpha=0.2, color=colors[i], bins=np.logspace(-2.5, 0, 20))
+
+        # Plot curves
+        axes[1,i].plot(alphas, mse_clean,
+                    label="Training input", color=colors[i], linestyle='dotted')
+        axes[1,i].plot(alphas, mse_ancestor,
+                    label="Inference input", color=colors[i])
+
+        # Grid and title
+        axes[1,i].grid(True, which='both', linestyle='--', alpha=0.3)
+        axes[0,i].set_title(model_name)
+
+        # --- Add final-value text under the title ---
+        print(model_name, "Clean:", mse_clean[-1], "Ancestor:", mse_ancestor[-1])
+
+        fig.text(
+            0.2 + i*0.33,   # places 3 groups left→right
+            0,            # slightly below suptitle
+            f"Training Final Error:  {mse_clean[-1]:.2e}\n"
+            f"Inference Final Error: {mse_ancestor[-1]:.2e}",
+            ha='center',
+            va='top',
+            fontsize=8,
+            color=colors[i]
+        )
+
+    for i in range(3):
+        axes[1,i].sharey(axes[1,-1])
+        axes[1,i].legend(fontsize=8)
         
+
+    axes[0,0].set_xscale('log')
+    axes[1,0].set_yscale('log')
+    axes[1,0].set_ylabel('MSE w/ ground-truth')
+    axes[0,0].set_ylabel('Noise Level sqrt(1-ᾱₜ) Distribution')
+    axes[1,1].set_xlabel('Noise Level sqrt(1-ᾱₜ), High = Only Noise, Low = Only Image')
+
+    plt.savefig(os.path.join(args.output_dir, "train-inf-gap.pdf"), bbox_inches="tight")
+
+
+if __name__ == "__main__":
+    main()
