@@ -12,7 +12,7 @@ from torch import nn
 from src.data_loader import get_data_loaders
 from src.model_diffusion import DiffusionModel
 from src.model import Unet
-from src.utils import count_parameters
+from src.utils import count_parameters, parse_checkpoint_args, run_model, run_model
 
 # ==========================================
 # 1. Utility Functions (FFT, Covariance)
@@ -156,12 +156,6 @@ def evaluate_trajectory_vorticity(predictions, ground_truth, threshold=0.8):
 # 3. Model Evaluation Logic
 # ==========================================
 
-def run_model(model, x):
-    if isinstance(model, DiffusionModel):
-        return model(x)
-    else:
-        return model(x, time=None)
-
 def evaluate_rollout(models, m_eval, traj_loader, device, rollout_steps=30):
     """
     Runs autoregressive rollout for multiple models over the FULL dataset.
@@ -275,21 +269,6 @@ def evaluate_rollout(models, m_eval, traj_loader, device, rollout_steps=30):
 # 4. Main Script
 # ==========================================
 
-def parse_checkpoint_args(args_list):
-    """
-    Parses a list of strings ["name=path", "name2=path2"] into a dictionary.
-    """
-    ckpt_dict = {}
-    for item in args_list:
-        if '=' in item:
-            name, path = item.split('=', 1)
-        else:
-            # Fallback for old behavior (auto-name)
-            path = item
-            name = os.path.basename(os.path.dirname(path)) + "_" + os.path.basename(path)
-        
-        ckpt_dict[name.strip()] = path.strip()
-    return ckpt_dict
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Diffusion Models on Turbulence Data")

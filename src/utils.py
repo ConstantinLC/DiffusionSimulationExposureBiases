@@ -3,6 +3,7 @@ import numpy as np
 from scipy.stats import binned_statistic
 from scipy.stats import pearsonr
 import os
+from src.model_diffusion import DiffusionModel
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -290,3 +291,24 @@ def get_next_run_number(base_dir):
         run_numbers = [int(d.split('_')[1]) for d in existing_runs]
         return max(run_numbers) + 1
     
+def parse_checkpoint_args(args_list):
+    """
+    Parses a list of strings ["name=path", "name2=path2"] into a dictionary.
+    """
+    ckpt_dict = {}
+    for item in args_list:
+        if '=' in item:
+            name, path = item.split('=', 1)
+        else:
+            # Fallback for old behavior (auto-name)
+            path = item
+            name = os.path.basename(os.path.dirname(path)) + "_" + os.path.basename(path)
+        
+        ckpt_dict[name.strip()] = path.strip()
+    return ckpt_dict
+
+def run_model(model, x):
+    if isinstance(model, DiffusionModel):
+        return model(x)
+    else:
+        return model(x, time=None)
