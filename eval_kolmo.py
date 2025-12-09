@@ -337,6 +337,7 @@ def main():
             dimension=2,
             dataSize=[64, 64],
             condChannels=2,
+            dataChannels=2,
             diffSchedule="psd",
             diffSteps=100,
             inferenceSamplingMode="ddpm",
