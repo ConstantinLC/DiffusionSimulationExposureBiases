@@ -10,14 +10,15 @@ from src.diffusion_utils import piecewise_log_beta_schedule
 from src.diffusion_utils import betas_from_sqrtOneMinusAlphasCumprod
 from src.diffusion_utils import ddim_x0_estimate
 from src.model import Unet
+from src.model_acdm_arch import UnetACDM
 
 ### DIFFUSION MODEL WITH CONDITIONING
 class DiffusionModel(nn.Module):
 
-    def __init__(self, dimension, dataSize, condChannels, diffSchedule, diffSteps, 
+    def __init__(self, dimension, dataSize, condChannels, dataChannels, diffSchedule, diffSteps, 
                  inferenceSamplingMode, inferenceConditioningIntegration, diffCondIntegration, 
                  inferenceInitialSampling = "random", x0_estimate_type="mean", padding_mode='circular',
-                 scheduled_sampling = False):
+                 scheduled_sampling = False, architecture="ours"):
         super(DiffusionModel, self).__init__()
 
         self.dimension = dimension
@@ -30,6 +31,7 @@ class DiffusionModel(nn.Module):
         self.inferenceSamplingMode = inferenceSamplingMode # "ddpm" or "ddim"
         self.diffCondIntegration = diffCondIntegration # "noisy" or "clean"
         self.scheduled_sampling = scheduled_sampling
+        self.architecture = architecture
 
         if diffSchedule == "linear":
             betas = linear_beta_schedule(timesteps=self.timesteps)
@@ -88,14 +90,25 @@ class DiffusionModel(nn.Module):
         self.register_buffer("sqrtOneMinusAlphasCumprod", sqrtOneMinusAlphasCumprod)
         self.register_buffer("sqrtPosteriorVariance", sqrtPosteriorVariance)
 
-        self.unet = Unet(
+
+        if self.architecture == "ACDM":
+            self.unet = UnetACDM(dim=128,
+                channels= condChannels + dataChannels,
+                dim_mults=(1,1,1),
+                use_convnext=True,
+                convnext_mult=1)
+        
+        elif self.architecture == "ours":
+            self.unet = Unet(
             dim=dataSize[0],
-            channels= 2*condChannels,
+            channels=condChannels+dataChannels,
             dim_mults=(1,1,1),
             use_convnext=True,
             convnext_mult=1,
             padding_mode=padding_mode
-        )
+            )
+        
+        else : raise Exception
 
         self.x0_estimate_type = x0_estimate_type
 
