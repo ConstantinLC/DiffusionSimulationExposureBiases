@@ -312,3 +312,76 @@ def run_model(model, x):
         return model(x)
     else:
         return model(x, time=None)
+    
+
+def _fft_magnitude(x, take_log=True):
+    """Compute magnitude of 2D FFT for tensor (N,C,H,W)."""
+    fft = torch.fft.fft2(x)
+    mag = torch.abs(fft)
+    if take_log:
+        mag = torch.log1p(mag)
+    return mag
+
+def _cov_torch(x, eps=1e-6):
+    """Covariance along batch dimension."""
+    x = x - x.mean(dim=0, keepdim=True)
+    N = x.shape[0]
+    cov = (x.T @ x) / (N - 1)
+    cov += torch.eye(cov.shape[0], device=x.device, dtype=x.dtype) * eps
+    return cov
+
+def _sqrtm_symmetric_torch(mat):
+    """Matrix square root via eigen-decomposition (symmetric PSD case)."""
+    eigvals, eigvecs = torch.linalg.eigh(mat)
+    eigvals = torch.clamp(eigvals, min=0)
+    sqrt_eigvals = torch.sqrt(eigvals)
+    return (eigvecs * sqrt_eigvals.unsqueeze(0)) @ eigvecs.T
+
+def frechet_distance_torch(mu1, sigma1, mu2, sigma2, eps=1e-6):
+    """Compute squared Fréchet distance between two Gaussians."""
+    diff = mu1 - mu2
+    diff_sq = diff.dot(diff)
+    cov_prod = sigma1 @ sigma2
+    covmean = _sqrtm_symmetric_torch(cov_prod)
+    trace_term = torch.trace(sigma1) + torch.trace(sigma2) - 2 * torch.trace(covmean)
+    trace_term = torch.clamp(trace_term, min=0)
+    return diff_sq + trace_term
+
+def _radial_average_vectorized(psd2d):
+    """Vectorized calculation of radial profiles."""
+    N, C, H, W = psd2d.shape
+    cy, cx = H // 2, W // 2
+    y, x = torch.meshgrid(torch.arange(H, device=psd2d.device),
+                          torch.arange(W, device=psd2d.device),
+                          indexing='ij')
+    r = torch.sqrt((x - cx)**2 + (y - cy)**2).long()
+    nbins = int(r.max()) + 1
+    
+    psd_flat = psd2d.view(N, C, -1)
+    r_flat = r.flatten() 
+    
+    radial_profiles = torch.zeros((N, C, nbins), device=psd2d.device, dtype=psd2d.dtype)
+    
+    for i in range(nbins):
+        mask = (r_flat == i)
+        if mask.any():
+            val = psd_flat[..., mask].mean(dim=-1)
+            radial_profiles[..., i] = val
+
+    return radial_profiles.view(N, -1)
+
+def fsd_torch_radial(real, gen, take_log=True, eps=1e-6):
+    """Computes FSD based on 1D Radial Power Spectra (Optimized)."""
+    real_mag = _fft_magnitude(real, take_log)**2 
+    gen_mag = _fft_magnitude(gen, take_log)**2
+    
+    Xr = _radial_average_vectorized(real_mag)
+    Xg = _radial_average_vectorized(gen_mag)
+    
+    mu_r = Xr.mean(dim=0)
+    mu_g = Xg.mean(dim=0)
+    cov_r = _cov_torch(Xr, eps)
+    cov_g = _cov_torch(Xg, eps)
+
+    fsd_sq = frechet_distance_torch(mu_r, cov_r, mu_g, cov_g)
+    return fsd_sq

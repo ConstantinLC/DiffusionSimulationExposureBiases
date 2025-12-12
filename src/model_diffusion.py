@@ -90,6 +90,8 @@ class DiffusionModel(nn.Module):
         self.register_buffer("sqrtOneMinusAlphasCumprod", sqrtOneMinusAlphasCumprod)
         self.register_buffer("sqrtPosteriorVariance", sqrtPosteriorVariance)
 
+        self.condChannels = condChannels
+        self.dataChannels = dataChannels
 
         if self.architecture == "ACDM":
             self.unet = UnetACDM(dim=128,
@@ -117,13 +119,14 @@ class DiffusionModel(nn.Module):
     def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False, 
                 return_denoiser_inputs:bool = False, input_type:str = "ancestor", lower_limit_timesteps_training:int = None, upper_limit_timesteps_training:int = None, 
                 error_amount:float = None,correcting_unet:nn.Module = None) -> torch.Tensor:
+
+        device = "cuda" if conditioning.is_cuda else "cpu"
+
         if data is None:
-            data = conditioning
+            N, C_cond, H, W = conditioning.shape
+            data = torch.zeros((N, self.dataChannels, H, W)).to(device)
         if self.dimension == 3:
             raise NotImplementedError()
-
-        device = "cuda" if data.is_cuda else "cpu"
-        seqLen = data.shape[1]
         # combine batch and sequence dimension for decoder processing
         d = data
         cond = conditioning
@@ -137,29 +140,28 @@ class DiffusionModel(nn.Module):
         # TRAINING
         if self.training:
 
+            original_d = d
             t = torch.randint(lower_limit_timesteps_training, upper_limit_timesteps_training, (d.shape[0],), device=device).long()
 
             if self.scheduled_sampling : 
 
-                with torch.no_grad():
+                t_prev = torch.minimum(t + 1, torch.ones(t.shape).long().to(device)*(self.timesteps-1))
 
-                    t_prev = torch.minimum(t + 1, torch.ones(t.shape).long().to(device)*(self.timesteps-1))
+                # forward diffusion process that adds noise to data
+                if self.diffCondIntegration == "noisy":
+                    d = torch.concat((cond, d), dim=1)
+                    noise = torch.randn_like(d, device=device)
+                    dNoisy = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * noise
 
-                    # forward diffusion process that adds noise to data
-                    if self.diffCondIntegration == "noisy":
-                        d = torch.concat((cond, d), dim=1)
-                        noise = torch.randn_like(d, device=device)
-                        dNoisy = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * noise
+                elif self.diffCondIntegration == "clean":
+                    dNoise = torch.randn_like(d, device=device)
+                    dNoisy = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
 
-                    elif self.diffCondIntegration == "clean":
-                        dNoise = torch.randn_like(d, device=device)
-                        dNoisy = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
-
-                        noise = torch.concat((cond, dNoise), dim=1)
-                        dNoisy = torch.concat((cond, dNoisy), dim=1)
-                    
-                    predictedNoise = self.unet(dNoisy, t_prev)[:, cond.shape[1]:]
-                    d = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t_prev] * predictedNoise)/self.sqrtAlphasCumprod[t_prev]
+                    noise = torch.concat((cond, dNoise), dim=1)
+                    dNoisy = torch.concat((cond, dNoisy), dim=1)
+                
+                predictedNoise = self.unet(dNoisy, t_prev)[:, cond.shape[1]:]
+                d = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t_prev] * predictedNoise)/self.sqrtAlphasCumprod[t_prev]
 
             # forward diffusion process that adds noise to data
             if self.diffCondIntegration == "noisy":
@@ -214,8 +216,17 @@ class DiffusionModel(nn.Module):
             if return_denoiser_inputs:
                 denoiser_inputs = []
 
+            if "clean-previous" in input_type:
+                nb_previous = int(input_type.split("-")[2])
+                t = nb_previous * torch.ones(cond.shape[0], device=device).long()
 
-            for i in reversed(range(0, self.timesteps, sampleStride)):
+                dNoise = torch.randn_like(d, device=device)
+                dNoise = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
+                timesteps = nb_previous + 1
+            else:
+                timesteps = self.timesteps
+
+            for i in reversed(range(0, timesteps, sampleStride)):
                 t = i * torch.ones(cond.shape[0], device=device).long()
 
                 # compute conditioned part with normal forward diffusion
@@ -230,16 +241,23 @@ class DiffusionModel(nn.Module):
                 if input_type == "clean":
                     dNoise = torch.randn_like(d, device=device)
                     dNoise = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
-                elif input_type == "clean-previous-step":
-                    dNoise = torch.randn_like(d, device=device)
-                    t_prev= torch.minimum(t + 1, torch.tensor(self.timesteps-1))
-                    dNoise = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
-                    dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
-                    predictedNoiseCond = self.unet(dNoiseCond, t_prev)
-                    modelMean = self.sqrtRecipAlphas[t_prev] * (dNoiseCond - self.betas[t_prev] * predictedNoiseCond / self.sqrtOneMinusAlphasCumprod[t_prev])
 
-                    dNoise = modelMean[:, cond.shape[1]:modelMean.shape[1]]
-                    dNoise = dNoise + self.sqrtPosteriorVariance[t_prev] * torch.randn_like(dNoise)
+                """elif "clean-previous" in  input_type:
+                    nb_previous = int(input_type.split("-")[2])
+                
+                    for i_previous in reversed(range(1, nb_previous+1, 1)):
+                        t_prev= torch.minimum(t + i_previous, torch.tensor(self.timesteps-1))
+
+                        if i_previous == nb_previous:
+                            dNoise = torch.randn_like(d, device=device)
+                            dNoise = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
+                        
+                        dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
+                        predictedNoiseCond = self.unet(dNoiseCond, t_prev)
+                        modelMean = self.sqrtRecipAlphas[t_prev] * (dNoiseCond - self.betas[t_prev] * predictedNoiseCond / self.sqrtOneMinusAlphasCumprod[t_prev])
+
+                        dNoise = modelMean[:, cond.shape[1]:modelMean.shape[1]]
+                        dNoise = dNoise + self.sqrtPosteriorVariance[t_prev] * torch.randn_like(dNoise)"""
                     
                 dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
 

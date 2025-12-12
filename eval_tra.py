@@ -10,63 +10,25 @@ from torch import nn
 
 # --- Project Imports ---
 from src.data_loader import get_data_loaders
+from src.dataset import TurbulenceDataset
+from src.data_transformations import DataParams, Transforms
 from src.model_diffusion import DiffusionModel
 from src.model import Unet
 from src.utils import count_parameters, parse_checkpoint_args, run_model, run_model
-from src.utils import correlation, vorticity, fsd_torch_radial
+from src.utils import fsd_torch_radial
+from torch.utils.data import DataLoader, SequentialSampler
 
-def evaluate_trajectory_vorticity(predictions, ground_truth, threshold=0.8):
-    """
-    Computes vorticity correlation stats and time-to-failure.
-    """
-    N, T, C, H, W = predictions.shape
-    print(predictions.shape)
-    pred_flat = predictions.reshape(-1, C, H, W)
-    print(ground_truth.shape)
-    gt_flat = ground_truth.reshape(-1, C, H, W)
-    
-    pred_vort = vorticity(pred_flat).reshape(N, T, H, W).cpu().numpy()
-    gt_vort = vorticity(gt_flat).reshape(N, T, H, W).cpu().numpy()
-    
-    corrs = np.zeros((N, T))
-    
-    for n in range(N):
-        for t in range(T):
-            corrs[n, t] = correlation(pred_vort[n, t], gt_vort[n, t])
-            
-    # --- Aggregates ---
-    mean_correlations = np.mean(corrs, axis=0) 
-    std_per_timestep = np.std(corrs, axis=0)
-
-    # --- Time Until Failure ---
-    below_threshold_mask = corrs < threshold
-    first_failure_indices = np.argmax(below_threshold_mask, axis=1)
-    has_failed = np.any(below_threshold_mask, axis=1)
-    times_under_threshold = np.where(has_failed, first_failure_indices + 1, T)
-    
-    sorted_times = np.sort(times_under_threshold)
-    cutoff_idx = max(1, int(0.1 * N)) 
-    worst_10_mean = np.mean(sorted_times[:cutoff_idx])
-    top_10_mean = np.mean(sorted_times[-cutoff_idx:])
-
-    return {
-        'mean_correlations': mean_correlations,
-        'std_per_timestep': std_per_timestep,
-        'time_under_threshold': np.mean(times_under_threshold),
-        'time_under_threshold_worst_10': worst_10_mean,
-        'time_under_threshold_best_10': top_10_mean,
-    }
 
 # ==========================================
 # 3. Model Evaluation Logic
 # ==========================================
 
-def evaluate_rollout(models, m_eval, traj_loader, device, rollout_steps=30):
+def evaluate_rollout(models, traj_loader, device, rollout_steps=30):
     """
     Runs autoregressive rollout for multiple models over the FULL dataset.
     """
     # 1. Set models to eval mode
-    for model in list(models.values()) + [m_eval]:
+    for model in list(models.values()):
         model.eval()
 
     # 2. Initialize accumulators
@@ -93,26 +55,17 @@ def evaluate_rollout(models, m_eval, traj_loader, device, rollout_steps=30):
             all_ground_truth.append(data.cpu())
 
             # Initial Condition (t=0)
-            conditioning_frame = data[:, 0]
-            
+            conditioning_frame = torch.cat((data[:, 0], data[:, 1]), dim=1)
             # Current state buffer for this batch
+            current_inputs = {name: conditioning_frame for name, model in models.items()}
             current_preds = {name: run_model(model, conditioning_frame) for name, model in models.items()}
             
-            # Batch trajectory buffer: List of T tensors, each (B, C, H, W)
+                        # Batch trajectory buffer: List of T tensors, each (B, C, H, W)
             batch_trajectory_buffer = {name: [] for name in models}
-
-            # --- B. Process Step 0 (Initial Prediction) ---
-            # We calculate this outside the loop to handle the "0-th" step logic cleanly
-            pred_eval_t0 = run_model(m_eval, conditioning_frame)
             
             for name in models:
                 # Store prediction
                 batch_trajectory_buffer[name].append(current_preds[name])
-                
-                # Compute distance vs Evaluator
-                # Mean over pixels/channels (C,H,W), Sum over Batch (B)
-                dist = torch.sum((pred_eval_t0 - current_preds[name]) ** 2, dim=(1,2,3))
-                running_eval_distances[name][0] += dist.sum()
 
             # --- C. Autoregressive Rollout (Steps 1 to T) ---
             for t in range(1, rollout_steps):
@@ -121,17 +74,11 @@ def evaluate_rollout(models, m_eval, traj_loader, device, rollout_steps=30):
                     # Note: In your previous logic, you compared Evaluator(x_t) vs x_{t+1}.
                     # If you want Evaluator(x_t) vs Model(x_t), align indices carefully. 
                     # Below follows your original logic: eval_pred = m_eval(current), next = model(current)
-                    eval_pred_on_model = run_model(m_eval, current_preds[name])
-                    
+                    current_inputs[name] = torch.cat((current_inputs[name][:, -model.dataChannels:], current_preds[name]), dim=1)
                     # 2. Step forward
-                    current_preds[name] = run_model(model, current_preds[name])
+                    current_preds[name] = run_model(model, current_inputs[name])
                     batch_trajectory_buffer[name].append(current_preds[name])
                     
-                    # 3. Compute distance
-                    # Squared diff between "Evaluator prediction" and "Model prediction"
-                    diff = (eval_pred_on_model - current_preds[name]) ** 2
-                    dist_sum = torch.sum(diff, dim=(1,2,3)).sum() # Sum over batch
-                    running_eval_distances[name][t] += dist_sum
 
             # --- D. Store Batch Results to CPU ---
             for name in models:
@@ -150,38 +97,27 @@ def evaluate_rollout(models, m_eval, traj_loader, device, rollout_steps=30):
     for name in models:
         # Concatenate all batches along dimension 0
         final_predictions[name] = torch.cat(all_predictions[name], dim=0)
+        print(final_predictions[name].shape)
         
     final_ground_truth = torch.cat(all_ground_truth, dim=0)
-
-    # Average the distances
-    final_eval_distances = {}
-    for name in models:
-        # Divide sum by total samples to get Mean Squared Error
-        avg_dist_tensor = running_eval_distances[name] / total_samples
-        # Convert to list of scalars to match original format
-        final_eval_distances[name] = [avg_dist_tensor[t] for t in range(rollout_steps)]
 
     print(f"Evaluation Complete. Total samples: {total_samples}")
     print(f"Prediction Shape: {final_predictions[list(models.keys())[0]].shape}")
 
+    
+    print(final_ground_truth.shape)
     return {
         "predictions": final_predictions,   # (N_total, T, C, H, W)
-        "eval_distances": final_eval_distances, # Dict of List of scalars
         "data": final_ground_truth          # (N_total, T_total, C, H, W)
     }
 
-# ==========================================
-# 4. Main Script
-# ==========================================
 
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Diffusion Models on Turbulence Data")
     
     # Paths
-    parser.add_argument('--data_path', type=str, required=True, help="Path to dataset root")
-    parser.add_argument('--eval_model_path', type=str, required=True, help="Path to the pretrained Evaluator UNet (.pth)")
-    
+    parser.add_argument('--data_path', type=str, required=True, help="Path to dataset root")    
     # UPDATED ARGUMENT:
     parser.add_argument('--checkpoints', nargs='+', required=True, 
                         help="List of checkpoints. Format: 'Name=/path/to/ckpt.pth'. Space separated.")
@@ -190,13 +126,14 @@ def main():
     
     # Params
     parser.add_argument('--resolution', type=int, default=64)
-    parser.add_argument('--batch_size', type=int, default=50) 
+    parser.add_argument('--limit_val_trajectories', type=int, default=10) 
     parser.add_argument('--rollout_steps', type=int, default=20)
+
     parser.add_argument('--device', type=str, default='cuda')
-    
+
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     # 0. Parse Checkpoints into Dictionary
     checkpoints_dict = parse_checkpoint_args(args.checkpoints)
     print(f"--- Evaluating {len(checkpoints_dict)} Models ---")
@@ -204,35 +141,22 @@ def main():
         print(f"  > {name}: {path}")
 
     # 1. Load Data
-    print("--- Loading Data ---")
-    data_params = {
-        "data_path": args.data_path,
-        "dataset_name": "KolmogorovFlow",
-        "resolution": args.resolution,
-        "sequence_length": [3, 1],
-        "trajectory_sequence_length": [64, 1], 
-        "frames_per_time_step": 1,
-        "limit_trajectories_train": 100,
-        "limit_trajectories_val": args.batch_size, 
-        "batch_size": args.batch_size
-    }
-    _, _, traj_loader = get_data_loaders(data_params)
+    p_d_test = DataParams(batch=4, augmentations=["normalize"], sequenceLength=[(60,2)], randSeqOffset=False,
+            dataSize=[128,64], dimension=2, simFields=["dens", "pres"], simParams=["mach"], normalizeMode="traMixed")
 
-    # 2. Load Evaluator Model
-    print(f"--- Loading Evaluator Model: {args.eval_model_path} ---")
-    m_eval = Unet(
-        dim=64, channels=2, dim_mults=(1,1,1),
-        use_convnext=True, convnext_mult=1, with_time_emb=False
-    ).to(args.device)
-    
-    checkpoint = torch.load(args.eval_model_path, map_location=args.device)
-    if 'stateDictDecoder' in checkpoint:
-        m_eval.load_state_dict(checkpoint['stateDictDecoder'])
-    else:
-        m_eval.load_state_dict(checkpoint)
-    m_eval.eval()
+    testSet = TurbulenceDataset("Test Interpolate Mach 0.66-0.68", [args.data_path], filterTop=["128_tra"], filterSim=[(16,19)],
+                    filterFrame=[(500,750)], sequenceLength=p_d_test.sequenceLength, simFields=p_d_test.simFields, simParams=p_d_test.simParams, printLevel="sim")
+    print(len(testSet))
+    transTest = Transforms(p_d_test)
+    testSet.transform = transTest
+    testSampler = SequentialSampler(testSet)
+    traj_loader = DataLoader(testSet, sampler=testSampler, batch_size=p_d_test.batch, drop_last=True, num_workers=4)
 
-    # 3. Load Candidate Models (Looping over Dictionary)
+    condChannels = 2 * (2 + len(p_d_test.simFields) + len(p_d_test.simParams))
+    dataChannels = 2 + len(p_d_test.simFields) + len(p_d_test.simParams)
+    print(condChannels, dataChannels)
+
+    # 2. Load Candidate Models (Looping over Dictionary)
     models = {}
     for name, ckpt_path in checkpoints_dict.items():
         print(f"--- Loading Candidate: {name} ---")
@@ -240,20 +164,22 @@ def main():
         # Initialize Architecture
         model = DiffusionModel(
             dimension=2,
-            dataSize=[64, 64],
-            condChannels=2,
-            dataChannels=2,
-            diffSchedule="psd",
-            diffSteps=100,
+            dataSize=[128, 64],
+            condChannels=condChannels,
+            dataChannels=dataChannels,
+            diffSchedule="linear",
+            diffSteps=20,
             inferenceSamplingMode="ddpm",
             inferenceConditioningIntegration="clean",
             diffCondIntegration="clean",
             inferenceInitialSampling="random",
-            x0_estimate_type="mean"
+            x0_estimate_type="mean",
+            architecture="ACDM"
         ).to(args.device)
         
         # Load weights
-        ckpt = torch.load(ckpt_path, map_location=args.device)
+        ckpt = torch.load(ckpt_path, map_location=args.device)['stateDictDecoder']
+        print(ckpt.keys())
         if 'state_dict' in ckpt:
             model.load_state_dict(ckpt['state_dict'])
         else:
@@ -263,22 +189,24 @@ def main():
 
     # 4. Run Evaluation
     print("--- Running Rollouts ---")
-    results = evaluate_rollout(models, m_eval, traj_loader, args.device, args.rollout_steps)
-    
+    results = evaluate_rollout(models, traj_loader, args.device, args.rollout_steps)
+
     # 5. Compute Metrics & Plotting
     print("--- Computing Metrics ---")
     
     final_metrics = {}
-    gt_trajectory = results["data"][:, 1:args.rollout_steps+1] 
+
+    gt_trajectory = results["data"][:, 2:args.rollout_steps] 
+    
 
     # Setup Figures
     fig_mse, ax_mse = plt.subplots(figsize=(10, 6))
     fig_fsd, ax_fsd = plt.subplots(figsize=(10, 6))
-    fig_corr, ax_corr = plt.subplots(figsize=(10, 6))
     fig_eval, ax_eval = plt.subplots(figsize=(10, 6))
 
     for name in models:
         preds = results["predictions"][name] 
+        preds = preds[:, :-2]
         
         # A. MSE
         mse_time = torch.mean((preds - gt_trajectory)**2, dim=(0,2,3,4)).cpu().numpy()
@@ -286,27 +214,13 @@ def main():
         
         # B. FSD
         fsd_time = []
-        for t in range(args.rollout_steps):
+        for t in range(args.rollout_steps-2):
             val = fsd_torch_radial(preds[:, t], gt_trajectory[:, t])
             fsd_time.append(val.item())
         ax_fsd.plot(fsd_time, label=name)
         
-        # C. Evaluator Distance
-        eval_dist_time = [d.item() for d in results["eval_distances"][name]]
-        ax_eval.plot(eval_dist_time, label=name)
-        
-        # D. Vorticity
-        vort_stats = evaluate_trajectory_vorticity(preds, gt_trajectory)
-        ax_corr.plot(vort_stats['mean_correlations'], label=name)
-        # Optional: Add error bars/shading
-        # ax_corr.fill_between(..., alpha=0.1)
-        
         final_metrics[name] = {
-            "time_to_failure_avg": vort_stats['time_under_threshold'],
-            "time_to_failure_worst10": vort_stats['time_under_threshold_worst_10'],
-            "time_to_failure_best10": vort_stats['time_under_threshold_best_10'],
             "final FSD": float(fsd_time[-1]),
-            "final evaluator distance": float(eval_dist_time[-1]),
             "Step 1 MSE": float(mse_time[0]),
             "Step 10 MSE": float(mse_time[10]),
             "Last step MSE": float(mse_time[-1])
@@ -332,14 +246,6 @@ def main():
     ax_eval.set_xlabel("Time Step")
     ax_eval.legend()
     fig_eval.savefig(os.path.join(args.output_dir, "metric_evaluator_dist.png"))
-    
-    ax_corr.set_title("Vorticity Correlation vs Time Step")
-    ax_corr.set_xlabel("Time Step")
-    ax_corr.set_ylabel("Pearson Correlation")
-    ax_corr.set_ylim(0, 1.05)
-    ax_corr.axhline(0.8, color='black', linestyle='--', alpha=0.5, label='Failure Threshold')
-    ax_corr.legend()
-    fig_corr.savefig(os.path.join(args.output_dir, "metric_correlation.png"))
     
     # Save Scalar Metrics
     with open(os.path.join(args.output_dir, "metrics_summary.json"), 'w') as f:
