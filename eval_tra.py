@@ -144,8 +144,13 @@ def main():
     p_d_test = DataParams(batch=4, augmentations=["normalize"], sequenceLength=[(60,2)], randSeqOffset=False,
             dataSize=[128,64], dimension=2, simFields=["dens", "pres"], simParams=["mach"], normalizeMode="traMixed")
 
-    testSet = TurbulenceDataset("Test Interpolate Mach 0.66-0.68", [args.data_path], filterTop=["128_tra"], filterSim=[(16,19)],
-                    filterFrame=[(500,750)], sequenceLength=p_d_test.sequenceLength, simFields=p_d_test.simFields, simParams=p_d_test.simParams, printLevel="sim")
+    #testSet = TurbulenceDataset("Test Interpolate Mach 0.66-0.68", [args.data_path], filterTop=["128_tra"], filterSim=[(16,19)],
+    #                filterFrame=[(500,750)], sequenceLength=p_d_test.sequenceLength, simFields=p_d_test.simFields, simParams=p_d_test.simParams, printLevel="sim")
+    
+
+    testSet = TurbulenceDataset("Test Extrapolate Mach 0.50-0.52", [args.data_path], filterTop=["128_tra"], filterSim=[(0,3)],
+                        filterFrame=[(500,750)], sequenceLength=[[60,2]], simFields=p_d_test.simFields, simParams=p_d_test.simParams, printLevel="sim")
+
     print(len(testSet))
     transTest = Transforms(p_d_test)
     testSet.transform = transTest

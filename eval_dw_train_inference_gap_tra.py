@@ -53,7 +53,7 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
                 print(model.sqrtAlphasCumprod.ravel())
                 _, x0_estimates = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="ancestor")
                 _, x0_estimates_clean = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean")
-                _, x0_estimates_clean_previous = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean-previous-4")
+                _, x0_estimates_clean_previous = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean-previous-1")
 
                 mse_ancestor = [(torch.mean((x0_estimates[t] - target_frame)**2)).item()
                         for t in range(len(x0_estimates))]
@@ -183,8 +183,8 @@ def main():
                     label="Training input", color=colors[i], linestyle='dotted')
         axes[1,i].plot(alphas, mse_ancestor,
                     label="Inference input", color=colors[i])
-        #axes[1,i].plot(alphas, mse_clean_prev,
-        #            label="Training input on previous step", color=colors[i], linestyle='dashdot')
+        axes[1,i].plot(alphas[1:], mse_clean_prev[1:],
+                    label="Training input on previous step", color="green")
 
         # Grid and title
         axes[1,i].grid(True, which='both', linestyle='--', alpha=0.3)
@@ -192,7 +192,7 @@ def main():
 
         # --- Add final-value text under the title ---
         #print(model_name, "Clean:", mse_clean[0], "Ancestor:", mse_ancestor[0])
-        print([(mse_ancestor[i]/mse_clean[i]) for i in range(len(mse_ancestor))])
+        print([(mse_ancestor[i]/mse_clean_prev[i]) for i in range(len(mse_ancestor))])
         print(model_name, "Clean:", mse_clean[-1], "Ancestor:", mse_ancestor[-1], "Clean on previous step:", mse_clean_prev[-1])
         print("\n")
         fig.text(

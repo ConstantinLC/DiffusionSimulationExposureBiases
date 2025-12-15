@@ -216,17 +216,7 @@ class DiffusionModel(nn.Module):
             if return_denoiser_inputs:
                 denoiser_inputs = []
 
-            if "clean-previous" in input_type:
-                nb_previous = int(input_type.split("-")[2])
-                t = nb_previous * torch.ones(cond.shape[0], device=device).long()
-
-                dNoise = torch.randn_like(d, device=device)
-                dNoise = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
-                timesteps = nb_previous + 1
-            else:
-                timesteps = self.timesteps
-
-            for i in reversed(range(0, timesteps, sampleStride)):
+            for i in reversed(range(0, self.timesteps, sampleStride)):
                 t = i * torch.ones(cond.shape[0], device=device).long()
 
                 # compute conditioned part with normal forward diffusion
@@ -242,7 +232,7 @@ class DiffusionModel(nn.Module):
                     dNoise = torch.randn_like(d, device=device)
                     dNoise = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
 
-                """elif "clean-previous" in  input_type:
+                elif "clean-previous" in  input_type:
                     nb_previous = int(input_type.split("-")[2])
                 
                     for i_previous in reversed(range(1, nb_previous+1, 1)):
@@ -257,7 +247,7 @@ class DiffusionModel(nn.Module):
                         modelMean = self.sqrtRecipAlphas[t_prev] * (dNoiseCond - self.betas[t_prev] * predictedNoiseCond / self.sqrtOneMinusAlphasCumprod[t_prev])
 
                         dNoise = modelMean[:, cond.shape[1]:modelMean.shape[1]]
-                        dNoise = dNoise + self.sqrtPosteriorVariance[t_prev] * torch.randn_like(dNoise)"""
+                        dNoise = dNoise + self.sqrtPosteriorVariance[t_prev] * torch.randn_like(dNoise)
                     
                 dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
 
