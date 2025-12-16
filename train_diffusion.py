@@ -7,7 +7,6 @@ import wandb
 from torch import optim
 from src.data_loader import get_data_loaders
 from src.model_diffusion import DiffusionModel
-from src.model_diffusion_lowpass_target import DiffusionModelLowPassTarget
 from src.trainer import train_diffusion_model, train_diffusion_model_multisteps
 from src.utils import count_parameters
 from src.utils import get_next_run_number

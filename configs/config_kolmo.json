@@ -13,7 +13,7 @@
         "dataset_name": "KolmogorovFlow",
         "data_path": "/mnt/SSD2/constantin/sda/data",
         "resolution": 64,
-        "sequence_length": [8, 1],
+        "sequence_length": [2, 1],
         "trajectory_sequence_length": [64, 1],
         "frames_per_time_step": 1,
         "limit_trajectories_train": 819,
@@ -28,8 +28,10 @@
     "model_params": {
         "dimension": 2,
         "dataSize": [64, 64],
+        "dataChannels": 2,
         "condChannels": 2,
-        "diffSchedule": "psd",
+        "diffSchedule": "linear",
+        "diffScheduleB": "psd",
         "diffSteps": 100,
         "inferenceSamplingMode": "ddpm",
         "inferenceConditioningIntegration": "clean",
@@ -39,7 +41,7 @@
         "scheduled_sampling": false
     },
     "low_pass_target": false,
-    "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/run_253/best_model.pth",
+    "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/run_188/best_model.pth",
     "wandb_params": {
         "project": "multi-steps-diffusion-training",
         "entity": "cleclei",

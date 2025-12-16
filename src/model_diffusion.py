@@ -1,5 +1,3 @@
-### Mainly copied from https://github.com/tum-pbs/autoreg-pde-diffusion/blob/main/src/turbpred/model_diffusion.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,18 +10,22 @@ from src.diffusion_utils import ddim_x0_estimate
 from src.model import Unet
 from src.model_acdm_arch import UnetACDM
 
+from matplotlib import pyplot as plt
+
 ### DIFFUSION MODEL WITH CONDITIONING
 class DiffusionModel(nn.Module):
 
-    def __init__(self, dimension, dataSize, condChannels, dataChannels, diffSchedule, diffSteps, 
-                 inferenceSamplingMode, inferenceConditioningIntegration, diffCondIntegration, 
+    def __init__(self, dimension, dataSize, condChannels, dataChannels, 
+                 diffSchedule, diffSteps, inferenceSamplingMode, 
+                 inferenceConditioningIntegration, diffCondIntegration, 
+                 diffScheduleB = "linear",
                  inferenceInitialSampling = "random", x0_estimate_type="mean", padding_mode='circular',
                  scheduled_sampling = False, architecture="ours"):
         super(DiffusionModel, self).__init__()
 
         self.dimension = dimension
-
         self.timesteps = diffSteps
+        
         # sampling settings
         self.inferencePosteriorSampling = "random"      # "random" or "same", ddpm only
         self.inferenceInitialSampling = inferenceInitialSampling       # "random" or "same"
@@ -33,62 +35,65 @@ class DiffusionModel(nn.Module):
         self.scheduled_sampling = scheduled_sampling
         self.architecture = architecture
 
-        if diffSchedule == "linear":
-            betas = linear_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "quadratic":
-            betas = quadratic_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "sigmoid":
-            betas = sigmoid_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "cosine":
-            betas = cosine_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "cubic":
-            betas = cubic_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "psd":
-            betas = psd_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "log-minus5-uniform":
-            betas = log_uniform_beta_schedule(timesteps=self.timesteps, min=-5)
-        elif diffSchedule == "log-minus7-uniform":
-            betas = log_uniform_beta_schedule(timesteps=self.timesteps, min=-7)
-        elif diffSchedule == "piecewise-log":
-            betas = piecewise_log_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "PSD++":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.5, 40),
-                                                                            torch.logspace(-1.5, -0.1, 45),
-                                                                            torch.logspace(-0.1, -0.0005, 15))))
-        elif diffSchedule == "PSD+":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.5, 30),
-                                                                            torch.logspace(-1.5, -0.1, 55),
-                                                                            torch.logspace(-0.1, -0.0001, 15))))
-        elif diffSchedule == "PSD+++":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.4, 50),
-                                                                            torch.logspace(-1.5, -0.1, 35),
-                                                                            torch.logspace(-0.1, -0.0005, 15))))
-        elif diffSchedule == "PSD+MinLogMinus2":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-2, -1.5, 30),
-                                                                            torch.logspace(-1.5, -0.1, 55),
-                                                                            torch.logspace(-0.1, -0.0005, 15))))
-        else:
-            raise ValueError("Unknown variance schedule")
-        
+        # --- SCHEDULE A (Physics/Sampling) ---
+        betas = self._get_betas_from_schedule(diffSchedule)
+        # Format betas for broadcasting
         betas = betas.unsqueeze(1).unsqueeze(2).unsqueeze(3)
+        
+        # Standard calculations for Schedule A
         alphas = 1.0 - betas
         alphasCumprod = torch.cumprod(alphas, axis=0)
+        # Pad with 1.0 at the beginning for t=0 calculation
         alphasCumprodPrev = F.pad(alphasCumprod[:-1], (0,0,0,0,0,0,1,0), value=1.0)
         sqrtRecipAlphas = torch.sqrt(1.0 / alphas)
-
-        # calculations for diffusion q(x_t | x_{t-1}) and others
         sqrtAlphasCumprod = torch.sqrt(alphasCumprod)
         sqrtOneMinusAlphasCumprod = torch.sqrt(1. - alphasCumprod)
-
+        
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         posteriorVariance = betas * (1. - alphasCumprodPrev) / (1. - alphasCumprod)
         sqrtPosteriorVariance = torch.sqrt(posteriorVariance)
 
+        # Register Schedule A buffers
         self.register_buffer("betas", betas)
         self.register_buffer("sqrtRecipAlphas", sqrtRecipAlphas)
         self.register_buffer("sqrtAlphasCumprod", sqrtAlphasCumprod)
         self.register_buffer("sqrtOneMinusAlphasCumprod", sqrtOneMinusAlphasCumprod)
         self.register_buffer("sqrtPosteriorVariance", sqrtPosteriorVariance)
+
+        # --- WEIGHT CALCULATION (Schedule A vs Schedule B) ---
+        # 1. Calculate sqrtAlphasCumprod for A (already done above)
+        sqrtAlphasCumprodPrev_A = torch.sqrt(alphasCumprodPrev)
+        
+        # 2. Calculate sqrtAlphasCumprod for B
+        betas_B = self._get_betas_from_schedule(diffScheduleB).unsqueeze(1).unsqueeze(2).unsqueeze(3)
+        alphas_B = 1.0 - betas_B
+        alphasCumprod_B = torch.cumprod(alphas_B, axis=0)
+        alphasCumprodPrev_B = F.pad(alphasCumprod_B[:-1], (0,0,0,0,0,0,1,0), value=1.0)
+        
+        sqrtAlphasCumprod_B = torch.sqrt(alphasCumprod_B)
+        sqrtAlphasCumprodPrev_B = torch.sqrt(alphasCumprodPrev_B)
+
+        # 3. Calculate Deltas (Derivatives of sqrtAlpha w.r.t steps)
+        # We add epsilon to denominator to prevent division by zero in pathological schedules
+        epsilon = 1e-8
+        delta_A = sqrtAlphasCumprod - sqrtAlphasCumprodPrev_A
+        delta_B = sqrtAlphasCumprod_B - sqrtAlphasCumprodPrev_B
+
+        # 4. Compute Weights: Ratio of slope A to slope B
+        # If A is steep (delta large), we sample it rarely (in time). To match B (if B is flat/delta small),
+        # we need to upweight A. 
+        # Importance Weight = P_target(x) / P_source(x) 
+        # P(x) ~ 1 / |delta|. Therefore Weight ~ |delta_A| / |delta_B|
+        step_weights = torch.abs(delta_A) / (torch.abs(delta_B) + epsilon)
+        fig = plt.figure()
+        plt.plot(sqrtAlphasCumprod.ravel(), step_weights.ravel())
+        plt.hist(sqrtAlphasCumprod.ravel(), alpha=0.2)
+        plt.hist(sqrtAlphasCumprod_B.ravel(), alpha=0.2)
+        fig.savefig("/mnt/SSD2/constantin/diffusion-multisteps/results/weighting.png")
+        
+        #self.register_buffer("step_weights", step_weights)
+        self.step_weights = step_weights.to('cuda')
+        print(step_weights)
 
         self.condChannels = condChannels
         self.dataChannels = dataChannels
@@ -114,11 +119,49 @@ class DiffusionModel(nn.Module):
 
         self.x0_estimate_type = x0_estimate_type
 
+    def _get_betas_from_schedule(self, schedule_name):
+        if schedule_name == "linear":
+            betas = linear_beta_schedule(timesteps=self.timesteps)
+        elif schedule_name == "quadratic":
+            betas = quadratic_beta_schedule(timesteps=self.timesteps)
+        elif schedule_name == "sigmoid":
+            betas = sigmoid_beta_schedule(timesteps=self.timesteps)
+        elif schedule_name == "cosine":
+            betas = cosine_beta_schedule(timesteps=self.timesteps)
+        elif schedule_name == "cubic":
+            betas = cubic_beta_schedule(timesteps=self.timesteps)
+        elif schedule_name == "psd":
+            betas = psd_beta_schedule(timesteps=self.timesteps)
+        elif schedule_name == "log-minus5-uniform":
+            betas = log_uniform_beta_schedule(timesteps=self.timesteps, min=-5)
+        elif schedule_name == "log-minus7-uniform":
+            betas = log_uniform_beta_schedule(timesteps=self.timesteps, min=-7)
+        elif schedule_name == "piecewise-log":
+            betas = piecewise_log_beta_schedule(timesteps=self.timesteps)
+        elif schedule_name == "PSD++":
+            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.5, 40),
+                                                                            torch.logspace(-1.5, -0.1, 45),
+                                                                            torch.logspace(-0.1, -0.0005, 15))))
+        elif schedule_name == "PSD+":
+            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.5, 30),
+                                                                            torch.logspace(-1.5, -0.1, 55),
+                                                                            torch.logspace(-0.1, -0.0001, 15))))
+        elif schedule_name == "PSD+++":
+            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.4, 50),
+                                                                            torch.logspace(-1.5, -0.1, 35),
+                                                                            torch.logspace(-0.1, -0.0005, 15))))
+        elif schedule_name == "PSD+MinLogMinus2":
+            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-2, -1.5, 30),
+                                                                            torch.logspace(-1.5, -0.1, 55),
+                                                                            torch.logspace(-0.1, -0.0005, 15))))
+        else:
+            raise ValueError(f"Unknown variance schedule: {schedule_name}")
+        return betas
 
     # input shape (both inputs): B S C W H (D) -> output shape (both outputs): B S nC W H (D)
     def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False, 
                 return_denoiser_inputs:bool = False, input_type:str = "ancestor", lower_limit_timesteps_training:int = None, upper_limit_timesteps_training:int = None, 
-                error_amount:float = None,correcting_unet:nn.Module = None) -> torch.Tensor:
+                error_amount:float = None, correcting_unet:nn.Module = None) -> torch.Tensor:
 
         device = "cuda" if conditioning.is_cuda else "cpu"
 
@@ -144,10 +187,9 @@ class DiffusionModel(nn.Module):
             t = torch.randint(lower_limit_timesteps_training, upper_limit_timesteps_training, (d.shape[0],), device=device).long()
 
             if self.scheduled_sampling : 
-
                 t_prev = torch.minimum(t + 1, torch.ones(t.shape).long().to(device)*(self.timesteps-1))
 
-                # forward diffusion process that adds noise to data
+                # forward diffusion process that adds noise to data (Uses Schedule A)
                 if self.diffCondIntegration == "noisy":
                     d = torch.concat((cond, d), dim=1)
                     noise = torch.randn_like(d, device=device)
@@ -163,7 +205,7 @@ class DiffusionModel(nn.Module):
                 predictedNoise = self.unet(dNoisy, t_prev)[:, cond.shape[1]:]
                 d = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t_prev] * predictedNoise)/self.sqrtAlphasCumprod[t_prev]
 
-            # forward diffusion process that adds noise to data
+            # forward diffusion process that adds noise to data (Uses Schedule A)
             if self.diffCondIntegration == "noisy":
                 d = torch.concat((cond, d), dim=1)
                 noise = torch.randn_like(d, device=device)
@@ -179,24 +221,28 @@ class DiffusionModel(nn.Module):
             else:
                 raise ValueError("Unknown conditioning integration mode")
 
-
             # noise prediction with network
             predictedNoise = self.unet(dNoisy, t)[:, cond.shape[1]:]
             noise = noise[:, cond.shape[1]:]
-            # unstack batch and sequence dimension again
+
+            # Retrieve pre-calculated importance weights
+            weights = self.step_weights[t]
+            scale_factor = torch.sqrt(weights).view(-1, 1, 1, 1)
 
             if return_x0_estimate:
                 if self.x0_estimate_type == "mean":
                     x0_estimate = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoise)/self.sqrtAlphasCumprod[t]
                 elif self.x0_estimate_type == "sample":
                     x0_estimate = ddim_x0_estimate(dNoisy, t, self, self.unet, 0, 0)
-                return noise, predictedNoise, x0_estimate
+                return noise, predictedNoise, x0_estimate, weights
                         
-            return noise, predictedNoise
-
+            noise_scaled = noise * scale_factor
+            predictedNoise_scaled = predictedNoise * scale_factor
+            return noise_scaled, predictedNoise_scaled
 
         # INFERENCE
         else:
+            # Inference uses Standard Schedule (A) buffers
             #torch.manual_seed(1)
             #torch.cuda.manual_seed(1)
 
@@ -273,10 +319,6 @@ class DiffusionModel(nn.Module):
                 if return_x0_estimate:
                     x0_estimate = (dNoiseCond[:, cond.shape[1]:modelMean.shape[1]]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, cond.shape[1]:modelMean.shape[1]])/self.sqrtAlphasCumprod[t]
                     all_x0_estimates.append(x0_estimate)
-
-                """if i == self.limit_timesteps_training and i != 0:
-                    dNoise = (dNoiseCond[:, -self.dimension:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, -self.dimension:])/self.sqrtAlphasCumprod[t]
-                    break"""
 
             if return_x0_estimate:
                 if return_denoiser_inputs:

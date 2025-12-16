@@ -233,3 +233,41 @@ def betas_from_sqrtOneMinusAlphasCumprod(sqrtOneMinusAlphasCumprod: torch.Tensor
     betas = torch.clamp(betas, min=1e-8, max=0.9)
 
     return betas
+
+def getSchedule(diffSchedule, timesteps):
+    if diffSchedule == "linear":
+        betas = linear_beta_schedule(timesteps)
+    elif diffSchedule == "quadratic":
+        betas = quadratic_beta_schedule(timesteps)
+    elif diffSchedule == "sigmoid":
+        betas = sigmoid_beta_schedule(timesteps)
+    elif diffSchedule == "cosine":
+        betas = cosine_beta_schedule(timesteps)
+    elif diffSchedule == "cubic":
+        betas = cubic_beta_schedule(timesteps)
+    elif diffSchedule == "psd":
+        betas = psd_beta_schedule(timesteps)
+    elif diffSchedule == "log-minus5-uniform":
+        betas = log_uniform_beta_schedule(timesteps, min=-5)
+    elif diffSchedule == "log-minus7-uniform":
+        betas = log_uniform_beta_schedule(timesteps, min=-7)
+    elif diffSchedule == "piecewise-log":
+        betas = piecewise_log_beta_schedule(timesteps)
+    elif diffSchedule == "PSD++":
+        betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.5, 40),
+                                                                        torch.logspace(-1.5, -0.1, 45),
+                                                                        torch.logspace(-0.1, -0.0005, 15))))
+    elif diffSchedule == "PSD+":
+        betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.5, 30),
+                                                                        torch.logspace(-1.5, -0.1, 55),
+                                                                        torch.logspace(-0.1, -0.0001, 15))))
+    elif diffSchedule == "PSD+++":
+        betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.4, 50),
+                                                                        torch.logspace(-1.5, -0.1, 35),
+                                                                        torch.logspace(-0.1, -0.0005, 15))))
+    elif diffSchedule == "PSD+MinLogMinus2":
+        betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-2, -1.5, 30),
+                                                                        torch.logspace(-1.5, -0.1, 55),
+                                                                        torch.logspace(-0.1, -0.0005, 15))))
+    else:
+        raise ValueError("Unknown variance schedule")
