@@ -88,7 +88,7 @@ def main():
     
     # Params
     parser.add_argument('--resolution', type=int, default=64)
-    parser.add_argument('--limit_val_trajectories', type=int, default=10) 
+    parser.add_argument('--limit_val_trajectories', type=int, default=1) 
     parser.add_argument('--device', type=str, default='cuda')
 
     args = parser.parse_args()
@@ -184,7 +184,7 @@ def main():
             color=colors[i]
         )
 
-    for i in range(3):
+    for i in range(len(models)):
         axes[1,i].sharey(axes[1,-1])
         axes[1,i].legend(fontsize=8)
         
