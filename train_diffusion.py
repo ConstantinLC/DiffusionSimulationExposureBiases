@@ -7,7 +7,6 @@ import wandb
 from torch import optim
 from src.data_loader import get_data_loaders
 from src.model_diffusion import DiffusionModel
-from src.model_diffusion_lowpass_target import DiffusionModelLowPassTarget
 from src.trainer import train_diffusion_model, train_diffusion_model_multisteps
 from src.utils import count_parameters
 from src.utils import get_next_run_number
@@ -48,10 +47,7 @@ def main():
 
     # --- Initialize model and data ---
     train_loader, val_loader, traj_loader = get_data_loaders(config['data_params'])
-    if config['low_pass_target']:
-        model = DiffusionModelLowPassTarget(**config['model_params'])
-    else:
-        model = DiffusionModel(**config['model_params'])
+    model = DiffusionModel(**config['model_params'])
 
     if config['checkpoint'] != "":
         checkpoint = torch.load(config['checkpoint'])

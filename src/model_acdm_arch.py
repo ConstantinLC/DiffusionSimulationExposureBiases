@@ -184,12 +184,30 @@ class PreNorm(nn.Module):
     def forward(self, x):
         x = self.norm(x)
         return self.fn(x)
+    
+
+class FourierEmbedding(nn.Module):
+    def __init__(self, out_channels, scale=16):
+        super().__init__()
+        self.register_buffer('freqs', torch.randn(out_channels // 2) * scale)
+
+    def forward(self, x):
+        # x is a tensor of noise levels (e.g., sigma or log-snr)
+        # shape: [batch_size]
+        
+        # Project scalar to frequencies
+        x = x.ger(self.freqs.to(x.dtype))
+        
+        # Use sine and cosine to create the high-dim vector
+        # This allows the model to "see" different periodic patterns
+        return torch.cat([x.sin(), x.cos()], dim=-1)
 
 
 class UnetACDM(nn.Module):
     def __init__(
         self,
         dim,
+        sigmas,
         init_dim=None,
         out_dim=None,
         dim_mults=(1, 2, 4, 8),
@@ -214,14 +232,16 @@ class UnetACDM(nn.Module):
             block_klass = partial(ConvNextBlock, mult=convnext_mult)
         else:
             block_klass = partial(ResnetBlock, groups=resnet_block_groups)
+        
+        self.register_buffer("sigmas", torch.ravel(sigmas))
 
         # time embeddings
         if with_time_emb:
             time_dim = dim * 4
             self.time_mlp = nn.Sequential(
-                SinusoidalPositionEmbeddings(dim),
+                FourierEmbedding(dim),
                 nn.Linear(dim, time_dim),
-                nn.GELU(),
+                nn.SiLU(),
                 nn.Linear(time_dim, time_dim),
             )
 
@@ -277,7 +297,10 @@ class UnetACDM(nn.Module):
     def forward(self, x, time):
         x = self.init_conv(x)
 
-        t = self.time_mlp(time) if self.time_mlp is not None else None
+        noise_levels = torch.log(self.sigmas[time])
+
+        t = self.time_mlp(noise_levels) if self.time_mlp is not None else None
+        #freq = self.multifreq_mlp(freq_band) if self.multifreq_mlp is not None else None
 
         h = []
 

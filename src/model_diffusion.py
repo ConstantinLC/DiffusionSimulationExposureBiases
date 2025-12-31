@@ -96,6 +96,7 @@ class DiffusionModel(nn.Module):
         if self.architecture == "ACDM":
             self.unet = UnetACDM(dim=128,
                 channels= condChannels + dataChannels,
+                sigmas = sqrtAlphasCumprod/sqrtOneMinusAlphasCumprod,
                 dim_mults=(1,1,1),
                 use_convnext=True,
                 convnext_mult=1)
@@ -103,6 +104,7 @@ class DiffusionModel(nn.Module):
         elif self.architecture == "ours":
             self.unet = Unet(
             dim=dataSize[0],
+            sigmas = sqrtAlphasCumprod/sqrtOneMinusAlphasCumprod,
             channels=condChannels+dataChannels,
             dim_mults=(1,1,1),
             use_convnext=True,
