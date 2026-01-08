@@ -206,6 +206,7 @@ def compute_estimate(model, k, cond, gt):
 
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 def betas_from_sqrtOneMinusAlphasCumprod(sqrtOneMinusAlphasCumprod: torch.Tensor) -> torch.Tensor:
     """
@@ -230,6 +231,6 @@ def betas_from_sqrtOneMinusAlphasCumprod(sqrtOneMinusAlphasCumprod: torch.Tensor
     betas = 1.0 - alphas
 
     # 4. Clamp betas for stability
-    betas = torch.clamp(betas, min=1e-8, max=0.9)
+    betas = torch.clamp(betas, min=1e-8, max=0.999)
 
     return betas

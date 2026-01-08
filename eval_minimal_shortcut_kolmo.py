@@ -49,12 +49,10 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
                 _, x0_estimates = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="ancestor")
                 _, x0_estimates_clean = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean")
                 model.train()
-                for ts in range(80, model.timesteps):
-                    for prev_ts in range(ts+1, model.timesteps):
-                        _, _, x0_estimate = model(conditioning=conditioning_frame, data=x0_estimates[model.timesteps-1-prev_ts], return_x0_estimate = True, 
-                         lower_limit_timesteps_training=ts, upper_limit_timesteps_training=ts+1)
-                        print(torch.mean((x0_estimate - target_frame)**2), torch.mean((x0_estimates_clean[model.timesteps-1-ts] - target_frame)**2), torch.mean((x0_estimates[model.timesteps-1-prev_ts] - target_frame)**2), model.sqrtAlphasCumprod.ravel()[prev_ts])
-                    break
+                for ts in range(0, model.timesteps):
+                    _, _, x0_estimate = model(conditioning=conditioning_frame, data=x0_estimates_clean[model.timesteps-ts-1], return_x0_estimate = True, 
+                        lower_limit_timesteps_training=ts, upper_limit_timesteps_training=ts+1)
+                    print(ts, torch.mean((x0_estimate - target_frame)**2)/torch.mean((x0_estimates_clean[model.timesteps-ts-1] - target_frame)**2))
 
                 mse_ancestor = [(torch.mean((x0_estimates[t] - target_frame)**2)).item()
                         for t in range(len(x0_estimates))]
@@ -148,6 +146,8 @@ def main():
             model.load_state_dict(ckpt['state_dict'])
         else:
             model.load_state_dict(ckpt)
+
+        model.resetSchedule(name)
             
         models[name] = model
 

@@ -31,6 +31,8 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
 
         mse_ancestor_all = {name: [] for name in models}
         mse_clean_all = {name: [] for name in models}
+        mse_clean_own_pred_all = {name: [] for name in models}
+
 
         for batch_idx, sample in enumerate(val_loader):
             
@@ -49,11 +51,17 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
                 _, x0_estimates = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="ancestor")
                 _, x0_estimates_clean = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean")
 
+                _, x0_estimates_clean_own_pred = model(conditioning=conditioning_frame, data=x0_estimates_clean[-1], return_x0_estimate=True, input_type="clean")
+                
                 mse_ancestor = [(torch.mean((x0_estimates[t] - target_frame)**2)).item()
                         for t in range(len(x0_estimates))]
                 mse_clean = [(torch.mean((x0_estimates_clean[t] - target_frame)**2)).item()
                          for t in range(len(x0_estimates))]
-
+            
+                mse_clean_own_pred = [(torch.mean((x0_estimates_clean_own_pred[t] - target_frame)**2)).item()
+                         for t in range(len(x0_estimates))]
+                
+                mse_clean_own_pred_all[name].append(mse_clean_own_pred)
                 mse_ancestor_all[name].append(mse_ancestor)
                 mse_clean_all[name].append(mse_clean)
 
@@ -61,14 +69,17 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
    
     mean_mse_ancestor = {}
     mean_mse_clean = {}
+    mean_mse_clean_own_pred = {}
     for name in models:
         # Concatenate all batches along dimension 0
         mean_mse_ancestor[name] = torch.mean(torch.tensor(mse_ancestor_all[name]), dim=0)
         mean_mse_clean[name] = torch.mean(torch.tensor(mse_clean_all[name]), dim=0)
+        mean_mse_clean_own_pred[name] = torch.mean(torch.tensor(mse_clean_own_pred_all[name]), dim=0)
 
     return {
         "mse_ancestor": mean_mse_ancestor,   # (N_total, T, C, H, W)
         "mse_clean": mean_mse_clean,   # (N_total, T, C, H, W)
+        "mse_clean_own_pred": mean_mse_clean_own_pred,   # (N_total, T, C, H, W)
     }
 
 
@@ -126,7 +137,7 @@ def main():
             dataSize=[64, 64],
             condChannels=2,
             dataChannels=2,
-            diffSchedule="psd",
+            diffSchedule="PSD-MoreLeftSpectrum-Kolmo",
             diffSteps=100,
             inferenceSamplingMode="ddpm",
             inferenceConditioningIntegration="clean",
@@ -141,6 +152,9 @@ def main():
             model.load_state_dict(ckpt['state_dict'])
         else:
             model.load_state_dict(ckpt)
+
+        #if name == "PSD-LeftShift":
+        model.resetSchedule(name)
             
         models[name] = model
 
@@ -156,6 +170,7 @@ def main():
     for i, model_name in enumerate(models):
         mse_ancestor = results['mse_ancestor'][model_name]
         mse_clean = results['mse_clean'][model_name]
+        mse_clean_own_pred = results['mse_clean_own_pred'][model_name]
         alphas = list(models[model_name].sqrtOneMinusAlphasCumprod.ravel().cpu())[::-1]
 
         axes[0,i].hist(alphas, alpha=0.2, color=colors[i], bins=np.logspace(-2.5, 0, 20))
@@ -177,7 +192,8 @@ def main():
             0.2 + i*0.33,   # places 3 groups left→right
             0,            # slightly below suptitle
             f"Training Final Error:  {mse_clean[-1]:.2e}\n"
-            f"Inference Final Error: {mse_ancestor[-1]:.2e}",
+            f"Inference Final Error: {mse_ancestor[-1]:.2e}\n"
+            f"Training Own Pred Final Error: {mse_clean_own_pred[-1]:.2e}",
             ha='center',
             va='top',
             fontsize=8,

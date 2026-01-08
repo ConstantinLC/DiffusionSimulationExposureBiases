@@ -54,6 +54,8 @@ def main():
         model.load_state_dict(checkpoint)
         print(f"Checkpoint loaded from {config['checkpoint']}")
 
+    model.resetSchedule(config['model_params']['diffSchedule'])
+
     print(f"Model has {count_parameters(model)} parameters.")
 
     # Initialize loss function
