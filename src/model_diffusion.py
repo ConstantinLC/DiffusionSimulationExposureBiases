@@ -248,6 +248,23 @@ class DiffusionModel(nn.Module):
 
                         dNoise = modelMean[:, cond.shape[1]:modelMean.shape[1]]
                         dNoise = dNoise + self.sqrtPosteriorVariance[t_prev] * torch.randn_like(dNoise)
+                
+                elif input_type == "own-pred":                
+                    t_prev = t
+
+                    dNoise = torch.randn_like(d, device=device)
+                    dNoise = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
+                
+                    dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
+                    predictedNoiseCond = self.unet(dNoiseCond, t_prev)
+                    x0_estimate = (dNoiseCond[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, cond.shape[1]:])/self.sqrtAlphasCumprod[t]
+                    
+                    dNoise = torch.randn_like(d, device=device)
+                    dNoise = self.sqrtAlphasCumprod[t] * x0_estimate + self.sqrtOneMinusAlphasCumprod[t] * dNoise
+                    #modelMean = self.sqrtRecipAlphas[t_prev] * (dNoiseCond - self.betas[t_prev] * predictedNoiseCond / self.sqrtOneMinusAlphasCumprod[t_prev])
+
+                    #dNoise = modelMean[:, cond.shape[1]:modelMean.shape[1]]
+                    #dNoise = dNoise + self.sqrtPosteriorVariance[t_prev] * torch.randn_like(dNoise)
                     
                 dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
 
