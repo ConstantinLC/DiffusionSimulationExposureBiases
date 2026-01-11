@@ -43,52 +43,6 @@ class DiffusionModel(nn.Module):
             betas = cosine_beta_schedule(timesteps=self.timesteps)
         elif diffSchedule == "cubic":
             betas = cubic_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "psd":
-            betas = psd_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "log-minus5-uniform":
-            betas = log_uniform_beta_schedule(timesteps=self.timesteps, min=-5)
-        elif diffSchedule == "log-minus7-uniform":
-            betas = log_uniform_beta_schedule(timesteps=self.timesteps, min=-7)
-        elif diffSchedule == "piecewise-log":
-            betas = piecewise_log_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "PSD++":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.5, 40),
-                                                                            torch.logspace(-1.5, -0.1, 45),
-                                                                            torch.logspace(-0.1, -0.0005, 15))))
-        elif diffSchedule == "PSD+":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.5, 30),
-                                                                            torch.logspace(-1.5, -0.1, 55),
-                                                                            torch.logspace(-0.1, -0.0001, 15))))
-        elif diffSchedule == "PSD+++":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.7, -1.4, 50),
-                                                                            torch.logspace(-1.5, -0.1, 35),
-                                                                            torch.logspace(-0.1, -0.0005, 15))))
-        elif diffSchedule == "PSD+MinLogMinus2":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-2, -1.5, 30),
-                                                                            torch.logspace(-1.5, -0.1, 55),
-                                                                            torch.logspace(-0.1, -0.0005, 15))))
-        elif diffSchedule == "PSD-MoreLeftSpectrum-Kolmo":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.67, -1.5, 60),
-                            torch.logspace(-1.5, -0.1, 30),
-                            torch.logspace(-0.1, -0.0001, 10))))
-        elif diffSchedule == "PSD-MoreMoreLeftSpectrum-Kolmo":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.67, -1.5, 85),
-                            torch.logspace(-1.5, -0.1, 10),
-                            torch.logspace(-0.1, -0.0001, 5))))
-        elif diffSchedule == "Log-1.8-Min":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.8, -1.5, 85),
-                            torch.logspace(-1.5, -0.1, 10),
-                            torch.logspace(-0.1, -0.0001, 5))))
-        elif diffSchedule == "Log-2-Min":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-2, -1.8, 85),
-                            torch.logspace(-1.8, -0.1, 10),
-                            torch.logspace(-0.1, -0.0001, 5))))
-        elif diffSchedule == "Log-2":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.logspace(-2, -1.99, 100))
-        elif diffSchedule == "Log-1.6-Min":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.6, -1.4, 85),
-                            torch.logspace(-1.4, -0.1, 10),
-                            torch.logspace(-0.1, -0.0001, 5))))
         else:
             raise ValueError("Unknown variance schedule")
         
@@ -147,68 +101,6 @@ class DiffusionModel(nn.Module):
             betas = sigmoid_beta_schedule(timesteps=self.timesteps)
         elif diffSchedule == "cosine":
             betas = cosine_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "psd":
-            betas = psd_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "psd+":
-            target = torch.concatenate((torch.logspace(-1.7, -1.5, 30),
-                            torch.logspace(-1.5, -0.1, 55),
-                            torch.logspace(-0.1, -0.0001, 15)))
-            
-            if self.timesteps == 20:
-                target = target[4::5]
-
-            betas = betas_from_sqrtOneMinusAlphasCumprod(target)
-        elif diffSchedule == "linear-raccourci":
-            target = torch.tensor([0.1764, 0.2500, 0.2903, 0.3981, 0.4987, 0.5907, 0.6730, 0.7447, 0.8056,
-                                    0.8559, 0.8962, 0.9276, 0.9511, 0.9682, 0.9800, 0.9880, 0.9931, 0.9962,
-                                    0.9980, 0.9990])
-            betas = betas_from_sqrtOneMinusAlphasCumprod(target)
-        elif diffSchedule == "transonic_iteration0":
-            target = torch.cat((torch.logspace(-0.8, -0.2, 10), torch.logspace(-0.2, -0.0005, 10)))
-            betas = betas_from_sqrtOneMinusAlphasCumprod(target)
-        elif diffSchedule == "transonic_iteration1":
-            target = torch.tensor([0.3981, 0.4484, 0.4987, 0.5447, 0.5907, 0.6318, 0.6730, 0.7447, 0.8056,
-                            0.8559, 0.8962, 0.9276, 0.9511, 0.9682, 0.9800, 0.9880, 0.9931, 0.9962,
-                            0.9980, 0.9990])
-            betas = betas_from_sqrtOneMinusAlphasCumprod(target)
-        elif diffSchedule == "transonic_iteration2":
-            target = torch.cat((torch.logspace(-0.7, -0.2, 14), torch.logspace(-0.17, -0.0005, 6)))
-            betas = betas_from_sqrtOneMinusAlphasCumprod(target)
-        elif diffSchedule == "transonic_iteration3":
-            target = torch.cat((torch.logspace(-0.7, -0.2, 14), torch.logspace(-0.16, -0.0005, 6)))
-            betas = betas_from_sqrtOneMinusAlphasCumprod(target)
-        elif diffSchedule == "transonic_iteration3_fullynoisefirststep":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.cat((torch.logspace(-0.7, -0.2, 14), torch.logspace(-0.16, -0.00005, 6))))
-        elif diffSchedule == "transonic_iteration4":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.cat((torch.logspace(-0.7, -0.5, 10), torch.logspace(-0.45, -0.0005, 10))))
-        elif diffSchedule == "transonic_iteration5":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.cat((torch.logspace(-1, -0.6, 10), torch.logspace(-0.55, -0.00005, 10))))
-        elif diffSchedule == "transonic_iteration6":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.cat((torch.logspace(-1.2, -1, 10), torch.logspace(-0.55, -0.00005, 10))))
-        elif diffSchedule == "transonic_iteration7":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.cat((torch.logspace(-1.2, -1, 14), torch.logspace(-0.16, -0.00005, 6))))
-        elif diffSchedule == "PSD-MoreLeftSpectrum-Kolmo":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.67, -1.5, 60),
-                            torch.logspace(-1.5, -0.1, 30),
-                            torch.logspace(-0.1, -0.0001, 10))))
-        elif diffSchedule == "PSD-MoreMoreLeftSpectrum-Kolmo":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.67, -1.5, 85),
-                            torch.logspace(-1.5, -0.1, 10),
-                            torch.logspace(-0.1, -0.0001, 5))))
-        elif diffSchedule == "Log-1.8-Min":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.8, -1.5, 85),
-                            torch.logspace(-1.5, -0.1, 10),
-                            torch.logspace(-0.1, -0.0001, 5))))
-        elif diffSchedule == "Log-2-Min":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-2, -1.8, 85),
-                            torch.logspace(-1.8, -0.1, 10),
-                            torch.logspace(-0.1, -0.0001, 5))))
-        elif diffSchedule == "Log-2":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.logspace(-2, -1.99, 100))
-        elif diffSchedule == "Log-1.6-Min":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.6, -1.4, 85),
-                            torch.logspace(-1.4, -0.1, 10),
-                            torch.logspace(-0.1, -0.0001, 5))))
         else:
             raise ValueError("Unknown variance schedule")
     
@@ -374,19 +266,19 @@ class DiffusionModel(nn.Module):
 
                         dNoise = modelMean[:, cond.shape[1]:modelMean.shape[1]]
                         dNoise = dNoise + self.sqrtPosteriorVariance[t_prev] * torch.randn_like(dNoise)
-
-                elif "input-own-pred" in input_type:    
-                    t_prev= t
+                
+                elif input_type == "own-pred":                
+                    t_prev = t
 
                     dNoise = torch.randn_like(d, device=device)
                     dNoise = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
                 
                     dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
                     predictedNoiseCond = self.unet(dNoiseCond, t_prev)
-                    modelMean = self.sqrtRecipAlphas[t_prev] * (dNoiseCond - self.betas[t_prev] * predictedNoiseCond / self.sqrtOneMinusAlphasCumprod[t_prev])
-
-                    dNoise = modelMean[:, cond.shape[1]:modelMean.shape[1]]
-                    dNoise = dNoise + self.sqrtPosteriorVariance[t_prev] * torch.randn_like(dNoise)
+                    x0_estimate = (dNoiseCond[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, cond.shape[1]:])/self.sqrtAlphasCumprod[t]
+                    
+                    dNoise = torch.randn_like(d, device=device)
+                    dNoise = self.sqrtAlphasCumprod[t] * x0_estimate + self.sqrtOneMinusAlphasCumprod[t] * dNoise
                     
                 dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
 
@@ -412,10 +304,6 @@ class DiffusionModel(nn.Module):
                 if return_x0_estimate:
                     x0_estimate = (dNoiseCond[:, cond.shape[1]:modelMean.shape[1]]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, cond.shape[1]:modelMean.shape[1]])/self.sqrtAlphasCumprod[t]
                     all_x0_estimates.append(x0_estimate)
-
-                """if i == self.limit_timesteps_training and i != 0:
-                    dNoise = (dNoiseCond[:, -self.dimension:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, -self.dimension:])/self.sqrtAlphasCumprod[t]
-                    break"""
 
             if return_x0_estimate:
                 if return_denoiser_inputs:

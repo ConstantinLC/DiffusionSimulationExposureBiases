@@ -55,40 +55,67 @@ def traj_eval_step(traj_loader, epoch, epoch_sampling_frequency, model, device, 
     return log_dict
 
 
+import torch
+import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR
+import wandb # Assuming wandb is imported globally
+
 def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_params, criterion, all_configs, checkpoint_dir):
     """
-    Trains a diffusion model, assuming W&B has already been initialized.
+    Trains a diffusion model with Cosine Annealing Learning Rate.
     """
     epoch_sampling_frequency = train_params["epoch_sampling_frequency"]
-    best_val_loss = float('inf')
-    best_traj_time = 0
-    best_traj_error = 100000000
-    optimizer = optim.Adam(model.parameters(), lr=train_params["learning_rate"])
     device = torch.device(train_params["device"])
+    
+    # --- Config extraction ---
+    num_epochs = train_params["num_epochs"]
+    lr_start = train_params["learning_rate_start"]
+    lr_end = train_params["learning_rate_end"]
+    
     model.to(device)
 
-    print(f"Starting Diffusion training on {device} for {train_params['num_epochs']} epochs...")
+    # --- 1. Optimizer & Scheduler Setup ---
+    optimizer = optim.Adam(model.parameters(), lr=lr_start)
+    
+    # T_max is the number of epochs until the LR reaches the minimum
+    scheduler = CosineAnnealingLR(
+        optimizer, 
+        T_max=train_params["T_max"], 
+        eta_min=lr_end
+    )
 
-    for epoch in range(train_params["num_epochs"]):
+    print(f"Starting Diffusion training on {device} for {num_epochs} epochs...")
+    print(f"LR Schedule: Cosine Annealing from {lr_start:.1e} to {lr_end:.1e}")
+
+    best_traj_error = float('inf')
+    best_traj_time = 0
+
+    for epoch in range(num_epochs):
         # --- Training Loop ---
         model.train()
         running_train_loss = 0.0
+        
         for batch_idx, sample in enumerate(train_loader):
             data = sample["data"].to(device)
             conditioning_frame = data[:, 0]
             target_frame = data[:, 1]
+            
             optimizer.zero_grad()
             noise, predicted_noise = model(conditioning_frame, target_frame)
             loss = criterion(predicted_noise, noise)
-            running_train_loss += loss.item()
+            
             loss.backward()
             optimizer.step()
+            
+            running_train_loss += loss.item()
+        
         avg_train_loss = running_train_loss / (batch_idx + 1)
         
         # --- Validation Loop ---
         if val_loader is None:
             avg_val_loss = 0.0
         else:
+            model.eval()  # Switch to eval mode
             running_val_loss = 0.0
             with torch.no_grad():
                 for batch_idx_val, sample_val in enumerate(val_loader):
@@ -97,26 +124,36 @@ def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_pa
                         continue
                     conditioning_frame_val = data_val[:, 0]
                     target_frame_val = data_val[:, 1]
+                    
                     noise, predicted_noise = model(conditioning_frame_val, target_frame_val)
                     loss_val = criterion(predicted_noise, noise)
                     running_val_loss += loss_val.item()
+            
             avg_val_loss = running_val_loss / (batch_idx_val + 1) if (batch_idx_val + 1) > 0 else 0
 
-        # --- Base Logging ---
+        # --- 2. Step Scheduler & Get Current LR ---
+        # Get the LR before stepping for logging accuracy
+        current_lr = optimizer.param_groups[0]["lr"]
+        scheduler.step()
+
+        # --- Logging ---
         log_dict = {
             "epoch": epoch + 1,
             "training_loss": avg_train_loss,
             "validation_loss": avg_val_loss,
+            "learning_rate": current_lr,  # Log LR to visualize the cosine curve
             "best_traj_time": best_traj_time,
-            "best_traj_error": best_traj_time
+            "best_traj_error": best_traj_error
         }
         
+        # Run trajectory evaluation periodically
         log_dict = traj_eval_step(traj_loader, epoch, epoch_sampling_frequency, model, device, all_configs, log_dict, checkpoint_dir)
 
         wandb.log(log_dict)
 
-        print(f"Epoch [{epoch+1}/{train_params['num_epochs']}], "
-              f"Training Loss: {avg_train_loss:.8f}, Validation Loss: {avg_val_loss:.8f}")
+        print(f"Epoch [{epoch+1}/{num_epochs}] | "
+              f"Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} | "
+              f"LR: {current_lr:.2e}")
 
     print("Training complete!")
     return model
