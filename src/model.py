@@ -225,8 +225,7 @@ class Unet(nn.Module):
 
         # determine dimensions
         self.channels = channels
-        #self.sigmas = sigmas
-        self.register_buffer("sigmas", torch.ravel(sigmas))
+        self.sigmas = torch.ravel(sigmas).to('cuda')
 
         init_dim = init_dim if init_dim is not None else dim // 3 * 2
         self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3, padding_mode=self.padding_mode)

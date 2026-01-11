@@ -51,10 +51,9 @@ def main():
 
     if config['checkpoint'] != "":
         checkpoint = torch.load(config['checkpoint'])
-        model.load_state_dict(checkpoint)
+        checkpoint = {key[5:]:checkpoint[key] for key in checkpoint if 'unet' in key and not 'sigmas' in key}
+        model.unet.load_state_dict(checkpoint)
         print(f"Checkpoint loaded from {config['checkpoint']}")
-
-    model.resetSchedule(config['model_params']['diffSchedule'])
 
     print(f"Model has {count_parameters(model)} parameters.")
 

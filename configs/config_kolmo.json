@@ -1,9 +1,9 @@
 {
     "train_params": {
-        "num_epochs": 1000,
+        "num_epochs": 300,
         "learning_rate_start": 0.0001,
         "learning_rate_end": 0.00001,
-        "T_max": 100,
+        "T_max": 200,
         "device": "cuda",
         "channels_per_frame": 2,
         "epoch_sampling_frequency": 20,
@@ -32,17 +32,15 @@
         "dataSize": [64, 64],
         "condChannels": 2,
         "dataChannels": 2,
-        "diffSchedule": "Center_6.31e-02",
-        "diffSteps": 100,
+        "diffSchedule": "lowNlMaxOut_0.02",
+        "diffSteps": 10,
         "inferenceSamplingMode": "ddpm",
         "inferenceConditioningIntegration": "clean",
         "diffCondIntegration": "clean",
         "x0_estimate_type": "mean",
-        "padding_mode": "circular",
-        "scheduled_sampling": false
+        "padding_mode": "circular"
     },
-    "low_pass_target": false,
-    "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/run_322/best_model.pth",
+    "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/run_279/best_model.pth",
     "wandb_params": {
         "project": "multi-steps-diffusion-training",
         "entity": "cleclei",

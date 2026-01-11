@@ -2,10 +2,8 @@ import torch
 import torch.optim as optim
 import wandb
 import os
-import json
-from src.loss import DifferentiableWeightedRadialFrequencyLoss
 from src.utils import evaluate_trajectory_vorticity, evaluate_trajectory_mse
-from src.diffusion_utils import ddim_x0_estimate, compute_estimate
+from src.diffusion_utils import compute_estimate
 
 
 def traj_eval_step(traj_loader, epoch, epoch_sampling_frequency, model, device, all_configs, log_dict, checkpoint_dir):
@@ -115,7 +113,6 @@ def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_pa
         if val_loader is None:
             avg_val_loss = 0.0
         else:
-            model.eval()  # Switch to eval mode
             running_val_loss = 0.0
             with torch.no_grad():
                 for batch_idx_val, sample_val in enumerate(val_loader):

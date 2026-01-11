@@ -5,10 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.diffusion_utils import linear_beta_schedule, quadratic_beta_schedule, sigmoid_beta_schedule
-from src.diffusion_utils import cosine_beta_schedule, cubic_beta_schedule, psd_beta_schedule, log_uniform_beta_schedule
-from src.diffusion_utils import piecewise_log_beta_schedule
-from src.diffusion_utils import betas_from_sqrtOneMinusAlphasCumprod
-from src.diffusion_utils import ddim_x0_estimate
+from src.diffusion_utils import cosine_beta_schedule, cubic_beta_schedule
+from src.diffusion_utils import low_nl_max_out_beta_schedule
 from src.model import Unet
 from src.model_acdm_arch import UnetACDM
 
@@ -18,7 +16,7 @@ class DiffusionModel(nn.Module):
     def __init__(self, dimension, dataSize, condChannels, dataChannels, diffSchedule, diffSteps, 
                  inferenceSamplingMode, inferenceConditioningIntegration, diffCondIntegration, 
                  inferenceInitialSampling = "random", x0_estimate_type="mean", padding_mode='circular',
-                 scheduled_sampling = False, architecture="ours"):
+                architecture="ours"):
         super(DiffusionModel, self).__init__()
 
         self.dimension = dimension
@@ -30,9 +28,10 @@ class DiffusionModel(nn.Module):
         self.inferenceConditioningIntegration = inferenceConditioningIntegration # "noisy" or "clean"
         self.inferenceSamplingMode = inferenceSamplingMode # "ddpm" or "ddim"
         self.diffCondIntegration = diffCondIntegration # "noisy" or "clean"
-        self.scheduled_sampling = scheduled_sampling
         self.architecture = architecture
-        print(diffSchedule)
+        
+        self.weights = torch.ones(self.timesteps)
+
         if diffSchedule == "linear":
             betas = linear_beta_schedule(timesteps=self.timesteps)
         elif diffSchedule == "quadratic":
@@ -43,6 +42,11 @@ class DiffusionModel(nn.Module):
             betas = cosine_beta_schedule(timesteps=self.timesteps)
         elif diffSchedule == "cubic":
             betas = cubic_beta_schedule(timesteps=self.timesteps)
+        elif "lowNlMaxOut" in diffSchedule:
+            min_nl = float(diffSchedule.split("_")[1])
+            betas = low_nl_max_out_beta_schedule(timesteps=self.timesteps, min_nl=min_nl)
+            self.weights = torch.concatenate((torch.tensor([0.9*self.timesteps]), 0.1*self.timesteps*torch.ones(self.timesteps-1))) # Sum of weights should be equal to self.timesteps
+            self.weights = self.weights.to('cuda')
         else:
             raise ValueError("Unknown variance schedule")
         
@@ -60,15 +64,14 @@ class DiffusionModel(nn.Module):
         posteriorVariance = betas * (1. - alphasCumprodPrev) / (1. - alphasCumprod)
         sqrtPosteriorVariance = torch.sqrt(posteriorVariance)
 
-        self.register_buffer("betas", betas)
-        self.register_buffer("sqrtRecipAlphas", sqrtRecipAlphas)
-        self.register_buffer("sqrtAlphasCumprod", sqrtAlphasCumprod)
-        self.register_buffer("sqrtOneMinusAlphasCumprod", sqrtOneMinusAlphasCumprod)
-        self.register_buffer("sqrtPosteriorVariance", sqrtPosteriorVariance)
+        self.betas = betas.to('cuda')
+        self.sqrtRecipAlphas = sqrtRecipAlphas.to('cuda')
+        self.sqrtAlphasCumprod = sqrtAlphasCumprod.to('cuda')
+        self.sqrtOneMinusAlphasCumprod = sqrtOneMinusAlphasCumprod.to('cuda')
+        self.sqrtPosteriorVariance = sqrtPosteriorVariance.to('cuda')
 
         self.condChannels = condChannels
         self.dataChannels = dataChannels
-        print(diffSchedule)
         if self.architecture == "ACDM":
             self.unet = UnetACDM(dim=128,
                 channels= condChannels + dataChannels,
@@ -91,39 +94,6 @@ class DiffusionModel(nn.Module):
         else : raise Exception
 
         self.x0_estimate_type = x0_estimate_type
-
-    def resetSchedule(self, diffSchedule):
-        if diffSchedule == "linear":
-            betas = linear_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "quadratic":
-            betas = quadratic_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "sigmoid":
-            betas = sigmoid_beta_schedule(timesteps=self.timesteps)
-        elif diffSchedule == "cosine":
-            betas = cosine_beta_schedule(timesteps=self.timesteps)
-        else:
-            raise ValueError("Unknown variance schedule")
-    
-        betas = betas.unsqueeze(1).unsqueeze(2).unsqueeze(3)
-        alphas = 1.0 - betas
-        alphasCumprod = torch.cumprod(alphas, axis=0)
-        alphasCumprodPrev = F.pad(alphasCumprod[:-1], (0,0,0,0,0,0,1,0), value=1.0)
-        sqrtRecipAlphas = torch.sqrt(1.0 / alphas)
-
-        # calculations for diffusion q(x_t | x_{t-1}) and others
-        sqrtAlphasCumprod = torch.sqrt(alphasCumprod)
-        sqrtOneMinusAlphasCumprod = torch.sqrt(1. - alphasCumprod)
-
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
-        posteriorVariance = betas * (1. - alphasCumprodPrev) / (1. - alphasCumprod)
-        sqrtPosteriorVariance = torch.sqrt(posteriorVariance)
-
-        self.betas = betas.to('cuda')
-        self.sqrtRecipAlphas = sqrtRecipAlphas.to('cuda')
-        self.sqrtAlphasCumprod = sqrtAlphasCumprod.to('cuda')
-        self.sqrtOneMinusAlphasCumprod = sqrtOneMinusAlphasCumprod.to('cuda')
-        self.sqrtPosteriorVariance = sqrtPosteriorVariance.to('cuda')
-
 
     # input shape (both inputs): B S C W H (D) -> output shape (both outputs): B S nC W H (D)
     def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False, 
@@ -203,20 +173,18 @@ class DiffusionModel(nn.Module):
             noise = noise[:, cond.shape[1]:]
             # unstack batch and sequence dimension again
 
-            if self.scheduled_sampling:
-                return noise, predictedNoise, noise_own_pred, predictedNoise_own_pred
+            weights = self.weights[t]
+            scale_factor = torch.sqrt(weights).view(-1, 1, 1, 1)
 
             if return_x0_estimate:
                 x0_estimate = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoise)/self.sqrtAlphasCumprod[t]
-                return noise, predictedNoise, x0_estimate
+                return scale_factor*noise, scale_factor*predictedNoise, x0_estimate
                         
-            return noise, predictedNoise
+            return scale_factor*noise, scale_factor*predictedNoise
 
 
         # INFERENCE
         else:
-            #torch.manual_seed(1)
-            #torch.cuda.manual_seed(1)
 
             # conditioned reverse diffusion process
             if self.inferenceInitialSampling == "random":
