@@ -137,8 +137,8 @@ def main():
             dataSize=[64, 64],
             condChannels=2,
             dataChannels=2,
-            diffSchedule="PSD-MoreLeftSpectrum-Kolmo",
-            diffSteps=100,
+            diffSchedule=name,
+            diffSteps=10,
             inferenceSamplingMode="ddpm",
             inferenceConditioningIntegration="clean",
             diffCondIntegration="clean",
@@ -152,9 +152,6 @@ def main():
             model.load_state_dict(ckpt['state_dict'])
         else:
             model.load_state_dict(ckpt)
-
-        #if name == "PSD-LeftShift":
-        model.resetSchedule(name)
             
         models[name] = model
 
