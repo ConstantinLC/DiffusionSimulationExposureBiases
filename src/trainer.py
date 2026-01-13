@@ -273,7 +273,7 @@ def train_diffusion_model_initial_exploration(model, train_loader, val_loader, t
     lr_end = train_params["learning_rate_end"]
     
     # Pruning threshold
-    tau = 1.02
+    tau = 1.05
     
     model.to(device)
 
