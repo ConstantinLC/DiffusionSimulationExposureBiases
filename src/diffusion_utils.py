@@ -59,8 +59,17 @@ def sigmoid_beta_schedule(timesteps):
     betas = torch.sigmoid(betas) * (beta_end - beta_start) + beta_start
     return torch.clip(betas, 0.0001, 0.9999)
 
-def low_nl_max_out_beta_schedule(timesteps, min_nl):
-    noise_levels = torch.logspace(min_nl, 0.9999, timesteps)
+def low_nl_max_out_beta_schedule(timesteps, min_log_nl):
+    noise_levels = torch.linspace(10**min_log_nl, 10**(-0.0001), timesteps)
+    betas = betas_from_sqrtOneMinusAlphasCumprod(noise_levels)
+    return betas
+
+def initial_exploration_beta_schedule(min_log_value, timesteps):
+    start = 10**min_log_value
+    end = 10**(-0.0001)
+
+    power = 0.5
+    noise_levels = torch.linspace(start**power, end**power, timesteps)**(1/power)
     betas = betas_from_sqrtOneMinusAlphasCumprod(noise_levels)
     return betas
 
@@ -123,3 +132,100 @@ def betas_from_sqrtOneMinusAlphasCumprod(sqrtOneMinusAlphasCumprod: torch.Tensor
     betas = torch.clamp(betas, min=1e-8, max=0.999)
 
     return betas
+
+
+def run_dynamic_checkpoint_inference(
+    model, 
+    conditioning_frame, 
+    target_frame,
+    checkpoint_map, 
+    ground_truth=None,
+    device="cuda"
+):
+    """
+    Runs the reverse diffusion process with dynamic checkpoint loading.
+    
+    Args:
+        model: The initialized DiffusionModel.
+        conditioning_frame: Tensor (B, C_cond, H, W).
+        checkpoint_map: Dict { float_alpha : str_path }.
+        ground_truth: (Optional) Tensor (B, C_data, H, W) for one-shot validation.
+        device: "cuda" or "cpu".
+    """
+    model.eval()
+    model.to(device)
+    cond = conditioning_frame.to(device)
+    target = target_frame.to(device)
+    
+    # 1. Setup Initial Noise
+    B, C, H, W = cond.shape
+    x0_estimate = torch.randn((B, model.dataChannels, H, W), device=device)
+
+    current_loaded_path = None
+    sqrtOneMinusAlphas = model.sqrtOneMinusAlphasCumprod.to(device)
+    
+    print(f"Starting Dynamic Inference over {model.timesteps} steps...")
+
+    with torch.no_grad():
+        # 2. Reverse Diffusion Loop
+        for i in reversed(range(0, model.timesteps)):
+            t = torch.full((B,), i, device=device, dtype=torch.long)
+            
+            # --- A. Dynamic Checkpoint Loading ---
+            current_noise_level = sqrtOneMinusAlphas[i].item()
+            
+            target_ckpt = None
+            for stored_alpha, ckpt_path in checkpoint_map.items():
+                # MODIFIED: Compare if numbers are the same up to the 5th decimal digit
+                if round(stored_alpha, 5) == round(current_noise_level, 5):
+                    target_ckpt = ckpt_path
+                    break
+            
+            if not target_ckpt:
+                continue
+            elif target_ckpt != current_loaded_path:
+                print(f"[Step {i} | Noise {current_noise_level:.5f}] Switching weights -> {target_ckpt}")
+                state_dict = torch.load(target_ckpt, map_location=device)
+                model.unet.load_state_dict(state_dict)
+                current_loaded_path = target_ckpt
+
+            # --- B. Prediction Step ---
+            noise = torch.randn_like(x0_estimate)
+
+            dNoise = model.sqrtAlphasCumprod[t] * x0_estimate + \
+                            model.sqrtOneMinusAlphasCumprod[t] * noise
+
+            # 2. Concatenate
+            dNoiseCond = torch.cat((cond, dNoise), dim=1)
+
+            # 3. Predict Noise
+            predictedNoiseCond = model.unet(dNoiseCond, t)
+            x0_estimate = (dNoiseCond[:, cond.shape[1]:]  - model.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, cond.shape[1]:])/model.sqrtAlphasCumprod[t]
+
+            # Clean prediction
+            clean_dNoise = model.sqrtAlphasCumprod[t] * target + \
+                                model.sqrtOneMinusAlphasCumprod[t] * noise
+
+            # 2. Concatenate
+            clean_dNoiseCond = torch.cat((cond, clean_dNoise), dim=1)
+
+            # 3. Predict Noise
+            clean_predictedNoiseCond = model.unet(clean_dNoiseCond, t)
+            clean_x0_estimate = (clean_dNoiseCond[:, cond.shape[1]:]  - model.sqrtOneMinusAlphasCumprod[t] * clean_predictedNoiseCond[:, cond.shape[1]:])/model.sqrtAlphasCumprod[t]
+            
+            # Clean Own Pred
+            noise = torch.randn_like(x0_estimate)
+            clean_dNoise = model.sqrtAlphasCumprod[t] * clean_x0_estimate + \
+                                model.sqrtOneMinusAlphasCumprod[t] * noise
+
+            # 2. Concatenate
+            clean_dNoiseCond = torch.cat((cond, clean_dNoise), dim=1)
+
+            # 3. Predict Noise
+            clean_predictedNoiseCond = model.unet(clean_dNoiseCond, t)
+            clean_op_x0_estimate = (clean_dNoiseCond[:, cond.shape[1]:]  - model.sqrtOneMinusAlphasCumprod[t] * clean_predictedNoiseCond[:, cond.shape[1]:])/model.sqrtAlphasCumprod[t]
+            
+
+            print(torch.mean((clean_x0_estimate-target)**2), torch.mean((clean_op_x0_estimate-target)**2)/torch.mean((clean_x0_estimate-target)**2), torch.mean((x0_estimate-target)**2))
+
+    return clean_x0_estimate, x0_estimate

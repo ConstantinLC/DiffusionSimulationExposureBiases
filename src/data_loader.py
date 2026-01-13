@@ -39,7 +39,7 @@ def get_data_loaders(data_params):
         )
 
         train_loader = DataLoader(trainSet, batch_size=data_params["batch_size"], shuffle=True, num_workers=0)
-        val_loader = DataLoader(valSet, batch_size=data_params["batch_size"], shuffle=False, num_workers=0)
+        val_loader = DataLoader(valSet, batch_size=data_params["val_batch_size"], shuffle=False, num_workers=0)
         traj_loader = DataLoader(trajSet, batch_size=data_params["batch_size"], shuffle=False, num_workers=0)
 
     elif data_params["dataset_name"] == "TransonicFlow":

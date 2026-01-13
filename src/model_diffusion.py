@@ -5,8 +5,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.diffusion_utils import linear_beta_schedule, quadratic_beta_schedule, sigmoid_beta_schedule
-from src.diffusion_utils import cosine_beta_schedule, cubic_beta_schedule
+from src.diffusion_utils import cosine_beta_schedule, cubic_beta_schedule, initial_exploration_beta_schedule
 from src.diffusion_utils import low_nl_max_out_beta_schedule
+from src.diffusion_utils import betas_from_sqrtOneMinusAlphasCumprod
 from src.model import Unet
 from src.model_acdm_arch import UnetACDM
 
@@ -30,7 +31,7 @@ class DiffusionModel(nn.Module):
         self.diffCondIntegration = diffCondIntegration # "noisy" or "clean"
         self.architecture = architecture
         
-        self.weights = torch.ones(self.timesteps)
+        self.weights = torch.ones(self.timesteps).to('cuda')
 
         if diffSchedule == "linear":
             betas = linear_beta_schedule(timesteps=self.timesteps)
@@ -42,14 +43,44 @@ class DiffusionModel(nn.Module):
             betas = cosine_beta_schedule(timesteps=self.timesteps)
         elif diffSchedule == "cubic":
             betas = cubic_beta_schedule(timesteps=self.timesteps)
+        elif diffSchedule == "initial_exploration":
+            betas = initial_exploration_beta_schedule(min_log_value=-2.2, timesteps=self.timesteps)
         elif "lowNlMaxOut" in diffSchedule:
-            min_nl = float(diffSchedule.split("_")[1])
-            betas = low_nl_max_out_beta_schedule(timesteps=self.timesteps, min_nl=min_nl)
-            self.weights = torch.concatenate((torch.tensor([0.9*self.timesteps]), 0.1*self.timesteps*torch.ones(self.timesteps-1))) # Sum of weights should be equal to self.timesteps
+            min_log_nl = float(diffSchedule.split("_")[1])
+            betas = low_nl_max_out_beta_schedule(timesteps=self.timesteps, min_log_nl=min_log_nl)
+            self.weights = torch.concatenate((torch.tensor([0.9*self.timesteps]), 0.1*self.timesteps/(self.timesteps-1)*torch.ones(self.timesteps-1))) # Sum of weights should be equal to self.timesteps
             self.weights = self.weights.to('cuda')
         else:
             raise ValueError("Unknown variance schedule")
         
+        self.compute_schedule_variables(betas)
+
+        self.condChannels = condChannels
+        self.dataChannels = dataChannels
+        if self.architecture == "ACDM":
+            self.unet = UnetACDM(dim=128,
+                channels= condChannels + dataChannels,
+                sigmas = self.sqrtAlphasCumprod/self.sqrtOneMinusAlphasCumprod,
+                dim_mults=(1,1,1),
+                use_convnext=True,
+                convnext_mult=1)
+        
+        elif self.architecture == "ours":
+            self.unet = Unet(
+            dim=dataSize[0],
+            sigmas = self.sqrtAlphasCumprod/self.sqrtOneMinusAlphasCumprod,
+            channels=condChannels+dataChannels,
+            dim_mults=(1,1,1),
+            use_convnext=True,
+            convnext_mult=1,
+            padding_mode=padding_mode
+            )
+        
+        else : raise Exception
+
+        self.x0_estimate_type = x0_estimate_type
+
+    def compute_schedule_variables(self, betas):
         betas = betas.unsqueeze(1).unsqueeze(2).unsqueeze(3)
         alphas = 1.0 - betas
         alphasCumprod = torch.cumprod(alphas, axis=0)
@@ -70,35 +101,23 @@ class DiffusionModel(nn.Module):
         self.sqrtOneMinusAlphasCumprod = sqrtOneMinusAlphasCumprod.to('cuda')
         self.sqrtPosteriorVariance = sqrtPosteriorVariance.to('cuda')
 
-        self.condChannels = condChannels
-        self.dataChannels = dataChannels
-        if self.architecture == "ACDM":
-            self.unet = UnetACDM(dim=128,
-                channels= condChannels + dataChannels,
-                sigmas = sqrtAlphasCumprod/sqrtOneMinusAlphasCumprod,
-                dim_mults=(1,1,1),
-                use_convnext=True,
-                convnext_mult=1)
-        
-        elif self.architecture == "ours":
-            self.unet = Unet(
-            dim=dataSize[0],
-            sigmas = self.sqrtAlphasCumprod/self.sqrtOneMinusAlphasCumprod,
-            channels=condChannels+dataChannels,
-            dim_mults=(1,1,1),
-            use_convnext=True,
-            convnext_mult=1,
-            padding_mode=padding_mode
-            )
-        
-        else : raise Exception
+    def delete_steps(self, steps_to_delete):
+        print(self.sqrtOneMinusAlphasCumprod.ravel())
+        retain_indices = [idx for idx in range(self.timesteps) if idx not in steps_to_delete]
+        new_noise_levels = self.sqrtOneMinusAlphasCumprod.ravel()[retain_indices]
+        print(new_noise_levels)
+        new_betas = betas_from_sqrtOneMinusAlphasCumprod(new_noise_levels)
+        self.compute_schedule_variables(new_betas)
 
-        self.x0_estimate_type = x0_estimate_type
+        self.unet.sigmas = (self.sqrtAlphasCumprod/self.sqrtOneMinusAlphasCumprod).ravel()
+
+        print(self.sqrtOneMinusAlphasCumprod.ravel())
+        self.timesteps = self.timesteps - len(steps_to_delete)
 
     # input shape (both inputs): B S C W H (D) -> output shape (both outputs): B S nC W H (D)
     def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False, 
-                return_denoiser_inputs:bool = False, input_type:str = "ancestor", lower_limit_timesteps_training:int = None, upper_limit_timesteps_training:int = None, 
-                error_amount:float = None,correcting_unet:nn.Module = None) -> torch.Tensor:
+                return_denoiser_inputs:bool = False, input_type:str = "ancestor", 
+                fixed_timestep:int = None) -> torch.Tensor:
 
         device = "cuda" if conditioning.is_cuda else "cpu"
 
@@ -111,29 +130,20 @@ class DiffusionModel(nn.Module):
         d = data
         cond = conditioning
 
-        if lower_limit_timesteps_training is None:
-            lower_limit_timesteps_training = 0
-
-        if upper_limit_timesteps_training is None:
-            upper_limit_timesteps_training = self.timesteps
-
         # TRAINING
         if self.training:
 
-            original_d = d
-            t = torch.randint(lower_limit_timesteps_training, upper_limit_timesteps_training, (d.shape[0],), device=device).long()
+            if fixed_timestep is None:
+                lower_limit_timesteps = 0
+                upper_limit_timesteps = self.timesteps
 
-            if "input-own-pred" in input_type:    
-                dNoise = torch.randn_like(d, device=device)
-                dNoise = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
-            
-                dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
-                predictedNoiseCond = self.unet(dNoiseCond, t_prev)
-                modelMean = self.sqrtRecipAlphas[t] * (dNoiseCond - self.betas[t] * predictedNoiseCond / self.sqrtOneMinusAlphasCumprod[t])
+            else:
+                lower_limit_timesteps = fixed_timestep    
+                upper_limit_timesteps = fixed_timestep + 1
 
-                dNoise = modelMean[:, cond.shape[1]:modelMean.shape[1]]
-                dNoise = dNoise + self.sqrtPosteriorVariance[t] * torch.randn_like(dNoise)
+            t = torch.randint(lower_limit_timesteps, upper_limit_timesteps, (d.shape[0],), device=device).long()
 
+            if "input-own-pred" in input_type:
                 # forward diffusion process that adds noise to data
                 if self.diffCondIntegration == "noisy":
                     d = torch.concat((cond, d), dim=1)
@@ -146,10 +156,12 @@ class DiffusionModel(nn.Module):
 
                     noise = torch.concat((cond, dNoise), dim=1)
                     dNoisy = torch.concat((cond, dNoisy), dim=1)
-                
-                predictedNoise_own_pred = self.unet(dNoisy, t)[:, cond.shape[1]:]
-                noise_own_pred = noise[:, cond.shape[1]:]
-                d = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoise)/self.sqrtAlphasCumprod[t]
+            
+                predictedNoiseCond = self.unet(dNoisy, t)
+                predictedNoise = predictedNoiseCond[:, cond.shape[1]:]
+
+                first_estimate = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoise)/self.sqrtAlphasCumprod[t]
+                d = first_estimate
 
             # forward diffusion process that adds noise to data
             if self.diffCondIntegration == "noisy":
@@ -175,6 +187,10 @@ class DiffusionModel(nn.Module):
 
             weights = self.weights[t]
             scale_factor = torch.sqrt(weights).view(-1, 1, 1, 1)
+
+            if "input-own-pred" in input_type:
+                x0_estimate = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoise)/self.sqrtAlphasCumprod[t]
+                return x0_estimate, first_estimate
 
             if return_x0_estimate:
                 x0_estimate = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoise)/self.sqrtAlphasCumprod[t]
@@ -210,9 +226,6 @@ class DiffusionModel(nn.Module):
                     condNoisy = self.sqrtAlphasCumprod[t] * cond + self.sqrtOneMinusAlphasCumprod[t] * cNoise
                 else:
                     condNoisy = cond
-
-                if torch.sum(t) == 0 and correcting_unet is not None:
-                    condNoisy = condNoisy + correcting_unet(condNoisy, time=None)
 
                 if input_type == "clean":
                     dNoise = torch.randn_like(d, device=device)
