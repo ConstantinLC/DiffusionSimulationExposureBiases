@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from src.diffusion_utils import linear_beta_schedule, quadratic_beta_schedule, sigmoid_beta_schedule
 from src.diffusion_utils import cosine_beta_schedule, cubic_beta_schedule, initial_exploration_beta_schedule
-from src.diffusion_utils import low_nl_max_out_beta_schedule
+from src.diffusion_utils import low_nl_max_out_beta_schedule, low_and_high_nl_focus
 from src.diffusion_utils import betas_from_sqrtOneMinusAlphasCumprod
 from src.model import Unet
 from src.model_acdm_arch import UnetACDM
@@ -50,6 +50,16 @@ class DiffusionModel(nn.Module):
             betas = low_nl_max_out_beta_schedule(timesteps=self.timesteps, min_log_nl=min_log_nl)
             self.weights = torch.concatenate((torch.tensor([0.9*self.timesteps]), 0.1*self.timesteps/(self.timesteps-1)*torch.ones(self.timesteps-1))) # Sum of weights should be equal to self.timesteps
             self.weights = self.weights.to('cuda')
+        elif "lowAndHighFocus" in diffSchedule:
+            if "2nditer" in diffSchedule:
+                betas = betas_from_sqrtOneMinusAlphasCumprod(torch.tensor([0.0159, 0.1000, 0.3125, 0.5250, 0.7375, 0.8438, 0.9500, 0.9624, 0.9749, 0.9873, 0.9935, 0.9998]))
+                self.timesteps = len(betas)
+                self.weights = torch.tensor([8.6667, 0.2222, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111]).to('cuda')
+            else:
+                min_log_nl = float(diffSchedule.split("_")[1])
+                betas = low_and_high_nl_focus(timesteps=self.timesteps, min_log_nl=min_log_nl)
+                self.weights = torch.concatenate((torch.tensor([0.9*self.timesteps]), 0.1*self.timesteps/(self.timesteps-1)*torch.ones(self.timesteps-1))) # Sum of weights should be equal to self.timesteps
+                self.weights = self.weights.to('cuda')
         else:
             raise ValueError("Unknown variance schedule")
         
@@ -162,6 +172,28 @@ class DiffusionModel(nn.Module):
 
                 first_estimate = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoise)/self.sqrtAlphasCumprod[t]
                 d = first_estimate
+            
+            if "input-prev-pred" in input_type:
+                # forward diffusion process that adds noise to data
+                t_prev = t+1
+
+                if self.diffCondIntegration == "noisy":
+                    d = torch.concat((cond, d), dim=1)
+                    noise = torch.randn_like(d, device=device)
+                    dNoisy = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * noise
+
+                elif self.diffCondIntegration == "clean":
+                    dNoise = torch.randn_like(d, device=device)
+                    dNoisy = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
+
+                    noise = torch.concat((cond, dNoise), dim=1)
+                    dNoisy = torch.concat((cond, dNoisy), dim=1)
+            
+                predictedNoiseCond = self.unet(dNoisy, t_prev)
+                predictedNoise = predictedNoiseCond[:, cond.shape[1]:]
+
+                first_estimate = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t_prev] * predictedNoise)/self.sqrtAlphasCumprod[t_prev]
+                d = first_estimate
 
             # forward diffusion process that adds noise to data
             if self.diffCondIntegration == "noisy":
@@ -231,22 +263,19 @@ class DiffusionModel(nn.Module):
                     dNoise = torch.randn_like(d, device=device)
                     dNoise = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
 
-                elif "clean-previous" in input_type:
-                    nb_previous = int(input_type.split("-")[2])
-                
-                    for i_previous in reversed(range(1, nb_previous+1, 1)):
-                        t_prev= torch.minimum(t + i_previous, torch.tensor(self.timesteps-1))
+                elif input_type == "prev-pred":
 
-                        if i_previous == nb_previous:
-                            dNoise = torch.randn_like(d, device=device)
-                            dNoise = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
-                        
-                        dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
-                        predictedNoiseCond = self.unet(dNoiseCond, t_prev)
-                        modelMean = self.sqrtRecipAlphas[t_prev] * (dNoiseCond - self.betas[t_prev] * predictedNoiseCond / self.sqrtOneMinusAlphasCumprod[t_prev])
+                    t_prev= torch.minimum(t + 1, torch.tensor(self.timesteps-1))
 
-                        dNoise = modelMean[:, cond.shape[1]:modelMean.shape[1]]
-                        dNoise = dNoise + self.sqrtPosteriorVariance[t_prev] * torch.randn_like(dNoise)
+                    dNoise = torch.randn_like(d, device=device)
+                    dNoise = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
+                    
+                    dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
+                    predictedNoiseCond = self.unet(dNoiseCond, t_prev)
+                    x0_estimate = (dNoiseCond[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t_prev] * predictedNoiseCond[:, cond.shape[1]:])/self.sqrtAlphasCumprod[t_prev]
+
+                    dNoise = torch.randn_like(d, device=device)
+                    dNoise = self.sqrtAlphasCumprod[t] * x0_estimate + self.sqrtOneMinusAlphasCumprod[t] * dNoise  
                 
                 elif input_type == "own-pred":                
                     t_prev = t
@@ -256,7 +285,7 @@ class DiffusionModel(nn.Module):
                 
                     dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
                     predictedNoiseCond = self.unet(dNoiseCond, t_prev)
-                    x0_estimate = (dNoiseCond[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, cond.shape[1]:])/self.sqrtAlphasCumprod[t]
+                    x0_estimate = (dNoiseCond[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t_prev] * predictedNoiseCond[:, cond.shape[1]:])/self.sqrtAlphasCumprod[t_prev]
                     
                     dNoise = torch.randn_like(d, device=device)
                     dNoise = self.sqrtAlphasCumprod[t] * x0_estimate + self.sqrtOneMinusAlphasCumprod[t] * dNoise

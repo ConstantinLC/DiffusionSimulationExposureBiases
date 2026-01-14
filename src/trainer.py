@@ -388,6 +388,7 @@ def train_diffusion_model_initial_exploration(model, train_loader, val_loader, t
 
                 # 3. Delete steps
                 model.delete_steps(steps_to_delete)
+                optimizer.state.clear()
 
         # ==========================
         # 3. Scheduler & Logging

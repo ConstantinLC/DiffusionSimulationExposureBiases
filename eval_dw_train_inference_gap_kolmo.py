@@ -13,7 +13,7 @@ from src.data_loader import get_data_loaders
 from src.model_diffusion import DiffusionModel
 from src.model import Unet
 from src.utils import count_parameters, parse_checkpoint_args, run_model, run_model
-
+from src.diffusion_utils import adapt_schedule
 
 def evaluate_dw_train_inf_gap(models, val_loader, device):
     """
@@ -32,7 +32,7 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
         mse_ancestor_all = {name: [] for name in models}
         mse_clean_all = {name: [] for name in models}
         mse_clean_own_pred_all = {name: [] for name in models}
-
+        mse_clean_prev_pred_all = {name: [] for name in models}
 
         for batch_idx, sample in enumerate(val_loader):
             
@@ -51,7 +51,9 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
                 _, x0_estimates = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="ancestor")
                 _, x0_estimates_clean = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean")
 
-                _, x0_estimates_clean_own_pred = model(conditioning=conditioning_frame, data=x0_estimates_clean[-1], return_x0_estimate=True, input_type="clean")
+                _, x0_estimates_clean_own_pred = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="own-pred")
+                _, x0_estimates_clean_prev_pred = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="prev-pred")
+
                 
                 mse_ancestor = [(torch.mean((x0_estimates[t] - target_frame)**2)).item()
                         for t in range(len(x0_estimates))]
@@ -61,28 +63,34 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
                 mse_clean_own_pred = [(torch.mean((x0_estimates_clean_own_pred[t] - target_frame)**2)).item()
                          for t in range(len(x0_estimates))]
                 
-                mse_clean_own_pred_all[name].append(mse_clean_own_pred)
+                mse_clean_prev_pred = [(torch.mean((x0_estimates_clean_prev_pred[t] - target_frame)**2)).item()
+                         for t in range(len(x0_estimates))]
+                
+                
                 mse_ancestor_all[name].append(mse_ancestor)
                 mse_clean_all[name].append(mse_clean)
+                mse_clean_own_pred_all[name].append(mse_clean_own_pred)
+                mse_clean_prev_pred_all[name].append(mse_clean_prev_pred)
 
     # 3. Aggregate results
    
     mean_mse_ancestor = {}
     mean_mse_clean = {}
     mean_mse_clean_own_pred = {}
+    mean_mse_clean_prev_pred = {}
     for name in models:
         # Concatenate all batches along dimension 0
         mean_mse_ancestor[name] = torch.mean(torch.tensor(mse_ancestor_all[name]), dim=0)
         mean_mse_clean[name] = torch.mean(torch.tensor(mse_clean_all[name]), dim=0)
         mean_mse_clean_own_pred[name] = torch.mean(torch.tensor(mse_clean_own_pred_all[name]), dim=0)
+        mean_mse_clean_prev_pred[name] = torch.mean(torch.tensor(mse_clean_prev_pred_all[name]), dim=0)
 
     return {
         "mse_ancestor": mean_mse_ancestor,   # (N_total, T, C, H, W)
         "mse_clean": mean_mse_clean,   # (N_total, T, C, H, W)
         "mse_clean_own_pred": mean_mse_clean_own_pred,   # (N_total, T, C, H, W)
+        "mse_clean_prev_pred": mean_mse_clean_prev_pred,   # (N_total, T, C, H, W)
     }
-
-
 
 
 def main():
@@ -122,7 +130,8 @@ def main():
         "frames_per_time_step": 1,
         "limit_trajectories_train": 100,
         "limit_trajectories_val": args.limit_val_trajectories, 
-        "batch_size": 200
+        "batch_size": 200,
+        "val_batch_size": 200
     }
     _, val_loader, _ = get_data_loaders(data_params)
 
@@ -137,8 +146,8 @@ def main():
             dataSize=[64, 64],
             condChannels=2,
             dataChannels=2,
-            diffSchedule="PSD-MoreLeftSpectrum-Kolmo",
-            diffSteps=100,
+            diffSchedule=name,
+            diffSteps=10,
             inferenceSamplingMode="ddpm",
             inferenceConditioningIntegration="clean",
             diffCondIntegration="clean",
@@ -152,9 +161,6 @@ def main():
             model.load_state_dict(ckpt['state_dict'])
         else:
             model.load_state_dict(ckpt)
-
-        #if name == "PSD-LeftShift":
-        model.resetSchedule(name)
             
         models[name] = model
 
@@ -168,18 +174,48 @@ def main():
 
     # --------------------
     for i, model_name in enumerate(models):
+        model = models[model_name]
         mse_ancestor = results['mse_ancestor'][model_name]
         mse_clean = results['mse_clean'][model_name]
         mse_clean_own_pred = results['mse_clean_own_pred'][model_name]
+        mse_clean_prev_pred = results['mse_clean_prev_pred'][model_name]
         alphas = list(models[model_name].sqrtOneMinusAlphasCumprod.ravel().cpu())[::-1]
 
         axes[0,i].hist(alphas, alpha=0.2, color=colors[i], bins=np.logspace(-2.5, 0, 20))
+
+        tau = 1.05
 
         # Plot curves
         axes[1,i].plot(alphas, mse_clean,
                     label="Training input", color=colors[i], linestyle='dotted')
         axes[1,i].plot(alphas, mse_ancestor,
                     label="Inference input", color=colors[i])
+        axes[1,i].plot(alphas, mse_clean_own_pred,
+                    label="Inference input", color=colors[i], linestyle='dashdot')
+        axes[1,i].plot(alphas, mse_clean_prev_pred,
+                    label="Inference input", color=colors[i], linestyle='dotted')
+        
+        
+        for j in range(len(mse_clean)):
+            prev_ratio = mse_clean_prev_pred[j]/mse_clean[j]
+            own_ratio = mse_clean_own_pred[j]/mse_clean[j]
+            print(alphas[j])
+            if own_ratio > tau:
+                print("Own error too high", own_ratio)
+            elif prev_ratio > tau:
+                print("Own error good, Prev error too high", prev_ratio)
+            else:
+                print("All good")
+
+        
+        #print("Old levels", torch.tensor(alphas[::-1]), model.weights)
+        
+        new_noise_levels, new_weights = adapt_schedule(torch.tensor(alphas[::-1]), model.weights, torch.flip(mse_clean_own_pred, dims=[0]), 
+                                                       torch.flip(mse_clean_prev_pred, dims=[0]), torch.flip(mse_clean, dims=[0]), tau=1.05, incr=10**0.2)
+        print("New levels", new_noise_levels, new_weights)
+
+        #print("Own-Pred error:", list(zip(mse_ancestor/mse_clean, mse_clean_prev_pred/mse_clean, alphas)))
+        #print("Prev-Pred error:", list(zip(alphas, )))
 
         # Grid and title
         axes[1,i].grid(True, which='both', linestyle='--', alpha=0.3)

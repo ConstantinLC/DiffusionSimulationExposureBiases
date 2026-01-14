@@ -1,9 +1,9 @@
 {
     "train_params": {
-        "num_epochs": 105,
+        "num_epochs": 1,
         "learning_rate_start": 0.0001,
         "learning_rate_end": 0.00001,
-        "T_max": 105,
+        "T_max": 1,
         "device": "cuda",
         "channels_per_frame": 2,
         "epoch_sampling_frequency": 20,

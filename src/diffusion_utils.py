@@ -64,6 +64,21 @@ def low_nl_max_out_beta_schedule(timesteps, min_log_nl):
     betas = betas_from_sqrtOneMinusAlphasCumprod(noise_levels)
     return betas
 
+def low_and_high_nl_focus(timesteps, min_log_nl):
+    start_log = min_log_nl
+    
+    n_mid = (timesteps-1)//2
+    n_high = (timesteps)//2
+    
+    # Construct parts (handling endpoints to avoid duplicates)
+    p1 = torch.tensor([10**start_log])
+    p2 = torch.linspace(0.1, 0.95, n_mid + 1)[:-1]
+    p3 = torch.linspace(0.95, 10**-0.0001, n_high)
+
+    noise_levels = torch.cat((p1, p2, p3))
+    betas = betas_from_sqrtOneMinusAlphasCumprod(noise_levels)
+    return betas
+
 def initial_exploration_beta_schedule(min_log_value, timesteps):
     start = 10**min_log_value
     end = 10**(-0.0001)
@@ -133,6 +148,35 @@ def betas_from_sqrtOneMinusAlphasCumprod(sqrtOneMinusAlphasCumprod: torch.Tensor
 
     return betas
 
+
+def adapt_schedule(noise_levels, weights, own_pred_errors, prev_pred_errors, clean_errors, tau, incr):
+    own_ratio = own_pred_errors/clean_errors
+    prev_ratio = prev_pred_errors/clean_errors
+
+    noise_levels = noise_levels.clone()
+    weights = weights.clone()
+    T = len(noise_levels)
+    base_weight = 0.1*T/(T-1)
+
+    indent = 0
+
+    for i in range(len(noise_levels)):
+        if own_ratio[i] > tau:
+            if i == 0:
+                noise_levels[i] = noise_levels[i]*incr
+            else:
+                weights[i] += base_weight
+                weights[0] -= base_weight
+        elif prev_ratio[i] > tau:
+            if i < T-1:
+                new_level = (noise_levels[i+indent] + noise_levels[i+1+indent])/2
+                noise_levels = torch.concatenate((noise_levels[:i+1+indent], torch.tensor([new_level]), noise_levels[i+1+indent:]))
+                weights = torch.concatenate((weights[:i+1+indent], torch.tensor([base_weight]).to('cuda'), weights[i+1+indent:]))
+                
+                weights[0] -= base_weight
+                indent += 1
+    
+    return noise_levels, weights
 
 def run_dynamic_checkpoint_inference(
     model, 
@@ -229,3 +273,120 @@ def run_dynamic_checkpoint_inference(
             print(torch.mean((clean_x0_estimate-target)**2), torch.mean((clean_op_x0_estimate-target)**2)/torch.mean((clean_x0_estimate-target)**2), torch.mean((x0_estimate-target)**2))
 
     return clean_x0_estimate, x0_estimate
+
+
+def find_optimal_schedule(
+    model, 
+    conditioning_frame, 
+    target_frame,
+    checkpoint_map, 
+    tau=0.05, 
+    device="cuda"
+):
+    """
+    Scans for an optimized sparse schedule by finding the largest step jumps
+    that maintain reconstruction error < tau.
+    """
+    model.eval()
+    model.to(device)
+    cond = conditioning_frame.to(device)
+    target = target_frame.to(device)
+    
+    # 1. Setup Constants
+    B, C, H, W = cond.shape
+    sqrtOneMinusAlphas = model.sqrtOneMinusAlphasCumprod.to(device)
+    sqrtAlphas = model.sqrtAlphasCumprod.to(device)
+    
+    # 2. Identify Valid Steps (Timesteps present in checkpoint_map)
+    # We map the continuous noise levels in the checkpoint dict back to discrete integer steps
+    valid_steps = []
+    step_to_ckpt_map = {}
+
+    print("Indexing available checkpoints...")
+    for t in range(model.timesteps):
+        current_noise_level = sqrtOneMinusAlphas[t].item()
+        
+        # Check if this noise level exists in the map
+        found_ckpt = None
+        for stored_alpha, ckpt_path in checkpoint_map.items():
+            if round(stored_alpha, 5) == round(current_noise_level, 5):
+                found_ckpt = ckpt_path
+                break
+        
+        if found_ckpt:
+            valid_steps.append(t)
+            step_to_ckpt_map[t] = found_ckpt
+
+    if not valid_steps:
+        raise ValueError("No matching checkpoints found for model timesteps.")
+
+    # 3. Begin Adaptive Search
+    # Start from the smallest available step (cleanest)
+    current_idx = 0 
+    schedule = [valid_steps[0]]
+    current_loaded_path = None
+
+    print(f"Starting Adaptive Search (tau={tau}) over {len(valid_steps)} checkpoints...")
+
+    with torch.no_grad():
+        # Iterate until we reach the end of the available steps
+        while current_idx < len(valid_steps) - 1:
+            
+            best_jump_idx = current_idx + 1
+            
+            # Greedily look forward to find the largest valid jump
+            for test_idx in range(current_idx + 1, len(valid_steps)):
+                t_val = valid_steps[test_idx]
+                t_tensor = torch.full((B,), t_val, device=device, dtype=torch.long)
+                
+                # --- A. Dynamic Checkpoint Loading ---
+                target_ckpt = step_to_ckpt_map[t_val]
+                
+                if target_ckpt != current_loaded_path:
+                    # Only load if we haven't already loaded it for this inner loop
+                    state_dict = torch.load(target_ckpt, map_location=device)
+                    model.unet.load_state_dict(state_dict)
+                    current_loaded_path = target_ckpt
+
+                # --- B. Simulation Step (Forward Process) ---
+                # We take the CLEAN target and add noise up to level t_val
+                noise = torch.randn((B, model.dataChannels, H, W), device=device)
+                
+                # Create the noisy input (simulating what the model would see at step t_val)
+                clean_dNoise = sqrtAlphas[t_val] * target + \
+                               sqrtOneMinusAlphas[t_val] * noise
+
+                # 2. Concatenate
+                clean_dNoiseCond = torch.cat((cond, clean_dNoise), dim=1)
+
+                # 3. Predict Noise
+                clean_predictedNoiseCond = model.unet(clean_dNoiseCond, t_tensor)
+                
+                # 4. Estimate x0 (Denoise)
+                # We calculate the clean estimate to measure error
+                clean_x0_estimate = (clean_dNoiseCond[:, cond.shape[1]:] - 
+                                     sqrtOneMinusAlphas[t_val] * clean_predictedNoiseCond[:, cond.shape[1]:]) / sqrtAlphas[t_val]
+
+                # --- C. Error Check ---
+                clean_error = torch.mean((clean_x0_estimate - target)**2).item()
+
+                if mse_error < tau:
+                    # This jump is safe, mark it as the current best and try the next one
+                    best_jump_idx = test_idx
+                else:
+                    # Error exceeded threshold; we cannot jump this far. 
+                    # Stop looking further forward.
+                    break
+            
+            # Commit the best jump found
+            next_step = valid_steps[best_jump_idx]
+            
+            # Visualization log
+            start_t = valid_steps[current_idx]
+            print(f"Jump: {start_t} -> {next_step} | Checkpoint: {step_to_ckpt_map[next_step]}")
+            
+            schedule.append(next_step)
+            current_idx = best_jump_idx
+
+    print(f"Final Schedule ({len(schedule)} steps): {schedule}")
+    return schedule
