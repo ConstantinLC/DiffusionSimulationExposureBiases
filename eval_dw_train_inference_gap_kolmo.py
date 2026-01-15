@@ -160,6 +160,7 @@ def main():
         if 'state_dict' in ckpt:
             model.load_state_dict(ckpt['state_dict'])
         else:
+            ckpt = {k:ckpt[k] for k in ckpt if 'unet' in k and not 'sigmas' in k}
             model.load_state_dict(ckpt)
             
         models[name] = model
@@ -207,14 +208,7 @@ def main():
             else:
                 print("All good")
 
-        
-        #print("Old levels", torch.tensor(alphas[::-1]), model.weights)
-        
-        new_noise_levels, new_weights = adapt_schedule(torch.tensor(alphas[::-1]), model.weights, torch.flip(mse_clean_own_pred, dims=[0]), 
-                                                       torch.flip(mse_clean_prev_pred, dims=[0]), torch.flip(mse_clean, dims=[0]), tau=1.05, incr=10**0.2)
-        print("New levels", new_noise_levels, new_weights)
-
-        #print("Own-Pred error:", list(zip(mse_ancestor/mse_clean, mse_clean_prev_pred/mse_clean, alphas)))
+        print("Own-Pred error:", list(zip(mse_ancestor/mse_clean, mse_clean_prev_pred/mse_clean, alphas)))
         #print("Prev-Pred error:", list(zip(alphas, )))
 
         # Grid and title

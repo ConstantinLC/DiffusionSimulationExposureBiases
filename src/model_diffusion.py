@@ -43,6 +43,11 @@ class DiffusionModel(nn.Module):
             betas = cosine_beta_schedule(timesteps=self.timesteps)
         elif diffSchedule == "cubic":
             betas = cubic_beta_schedule(timesteps=self.timesteps)
+        elif diffSchedule == "Log-2-Min":
+            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-2, -1.8, 85),
+                            torch.logspace(-1.8, -0.1, 10),
+                            torch.logspace(-0.1, -0.0001, 5))))
+            self.timesteps=100
         elif diffSchedule == "initial_exploration":
             betas = initial_exploration_beta_schedule(min_log_value=-2.2, timesteps=self.timesteps)
         elif "lowNlMaxOut" in diffSchedule:
@@ -51,19 +56,16 @@ class DiffusionModel(nn.Module):
             self.weights = torch.concatenate((torch.tensor([0.9*self.timesteps]), 0.1*self.timesteps/(self.timesteps-1)*torch.ones(self.timesteps-1))) # Sum of weights should be equal to self.timesteps
             self.weights = self.weights.to('cuda')
         elif "lowAndHighFocus" in diffSchedule:
-            if "2nditer" in diffSchedule:
-                betas = betas_from_sqrtOneMinusAlphasCumprod(torch.tensor([0.0159, 0.1000, 0.3125, 0.5250, 0.7375, 0.8438, 0.9500, 0.9624, 0.9749, 0.9873, 0.9935, 0.9998]))
-                self.timesteps = len(betas)
-                self.weights = torch.tensor([8.6667, 0.2222, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111, 0.1111]).to('cuda')
-            else:
-                min_log_nl = float(diffSchedule.split("_")[1])
-                betas = low_and_high_nl_focus(timesteps=self.timesteps, min_log_nl=min_log_nl)
-                self.weights = torch.concatenate((torch.tensor([0.9*self.timesteps]), 0.1*self.timesteps/(self.timesteps-1)*torch.ones(self.timesteps-1))) # Sum of weights should be equal to self.timesteps
-                self.weights = self.weights.to('cuda')
+            min_log_nl = float(diffSchedule.split("_")[1])
+            betas = low_and_high_nl_focus(timesteps=self.timesteps, min_log_nl=min_log_nl)
+            self.weights = torch.concatenate((torch.tensor([0.9*self.timesteps]), 0.1*self.timesteps/(self.timesteps-1)*torch.ones(self.timesteps-1))) # Sum of weights should be equal to self.timesteps
+            self.weights = self.weights.to('cuda')
         else:
             raise ValueError("Unknown variance schedule")
         
         self.compute_schedule_variables(betas)
+
+        print(self.sqrtOneMinusAlphasCumprod.ravel())
 
         self.condChannels = condChannels
         self.dataChannels = dataChannels

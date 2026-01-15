@@ -14,7 +14,7 @@ from src.trainer import train_diffusion_model, train_diffusion_model_multisteps
 from src.utils import get_next_run_number, count_parameters
 from src.diffusion_utils import betas_from_sqrtOneMinusAlphasCumprod
 
-# --- The Schedule Adaptation Function (Provided by you) ---
+# --- The Schedule Adaptation Function ---
 def adapt_schedule(noise_levels, weights, own_pred_errors, prev_pred_errors, clean_errors, tau, incr):
     # Ensure inputs are on CPU for logic processing
     noise_levels = noise_levels.cpu().clone()
@@ -32,9 +32,7 @@ def adapt_schedule(noise_levels, weights, own_pred_errors, prev_pred_errors, cle
     indent = 0
     
     # We iterate and modify locally. 
-    # Note: Logic follows your snippet. 
     # Important: noise_levels must be sorted from clean (low noise) to noisy (high noise) 
-    # matching the iteration direction 0 -> T.
     
     for i in range(T):
         if i >= len(own_ratio): break # Safety check
@@ -73,61 +71,55 @@ def evaluate_model_for_adaptation(model, val_loader, device):
     Returns tensors sorted by noise level (Low Noise -> High Noise).
     """
     model.eval()
+    mse_ancestor_list = []
     mse_clean_list = []
     mse_own_list = []
     mse_prev_list = []
-    
-    # We need to map t indices to actual noise levels to sort them later
-    # Model stores levels as sqrtOneMinusAlphasCumprod
-    # Usually model.sqrtOneMinusAlphasCumprod is shape [T]
     
     with torch.no_grad():
         for batch in val_loader:
             data = batch["data"].to(device)
             cond = data[:, 0]
             target = data[:, 1]
+
+            # 1. Ancestor (Ground Truth input)
+            _, x0_ancestor = model(conditioning=cond, data=target, return_x0_estimate=True)
             
-            # 1. Clean (Ground Truth input)
+            # 2. Clean (Ground Truth input)
             _, x0_clean = model(conditioning=cond, data=target, return_x0_estimate=True, input_type="clean")
             
-            # 2. Own Pred (Input is model's own output at t)
+            # 3. Own Pred (Input is model's own output at t)
             _, x0_own = model(conditioning=cond, data=target, return_x0_estimate=True, input_type="own-pred")
             
-            # 3. Prev Pred (Input is model's output at t+1)
+            # 4. Prev Pred (Input is model's output at t+1)
             _, x0_prev = model(conditioning=cond, data=target, return_x0_estimate=True, input_type="prev-pred")
 
             # Compute MSE per timestep for this batch
-            # Shape of x0_estimates: [T, B, C, H, W]
-            # We want mean over [B, C, H, W]
-            
+            batch_mse_ancestor = torch.mean((x0_ancestor - target.unsqueeze(0))**2, dim=(1,2,3,4))
             batch_mse_clean = torch.mean((x0_clean - target.unsqueeze(0))**2, dim=(1,2,3,4))
             batch_mse_own = torch.mean((x0_own - target.unsqueeze(0))**2, dim=(1,2,3,4))
             batch_mse_prev = torch.mean((x0_prev - target.unsqueeze(0))**2, dim=(1,2,3,4))
             
+            mse_ancestor_list.append(batch_mse_ancestor)
             mse_clean_list.append(batch_mse_clean)
             mse_own_list.append(batch_mse_own)
             mse_prev_list.append(batch_mse_prev)
 
     # Average over batches
-    mse_clean = torch.stack(mse_clean_list).mean(dim=0)
-    mse_own = torch.stack(mse_own_list).mean(dim=0)
-    mse_prev = torch.stack(mse_prev_list).mean(dim=0)
+    mse_ancestor = torch.stack(mse_ancestor_list).mean(dim=0).flip(dims=[0])
+    mse_clean = torch.stack(mse_clean_list).mean(dim=0).flip(dims=[0])
+    mse_own = torch.stack(mse_own_list).mean(dim=0).flip(dims=[0])
+    mse_prev = torch.stack(mse_prev_list).mean(dim=0).flip(dims=[0])
     
-    # The arrays are currently indexed 0..T-1. 
-    # Usually in diffusion implementation:
-    # Index 0 is LOW noise (near data), Index T-1 is HIGH noise.
-    # We must ensure this aligns with adapt_schedule logic.
-    # Your adapt_schedule logic seems to assume i=0 is the cleanest step (lowest noise).
-    
-    return mse_own, mse_prev, mse_clean
+    return mse_ancestor, mse_own, mse_prev, mse_clean
 
 # --- Main Sequential Loop ---
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/config.json')
-    parser.add_argument('--rounds', type=int, default=3, help="Number of sequential training rounds")
+    parser.add_argument('--rounds', type=int, default=5, help="Number of sequential training rounds")
     parser.add_argument('--tau', type=float, default=1.05, help="Threshold for schedule adaptation")
-    parser.add_argument('--incr', type=float, default=10**0.2, help="Increment factor for noise level")
+    parser.add_argument('--log_incr', type=float, default=0.1, help="Logarithmic Increment factor for noise level")
     args = parser.parse_args()
 
     # Load config
@@ -145,13 +137,16 @@ def main():
     current_weights = None
 
     base_checkpoint_dir = './checkpoints'
+
+    run_number = get_next_run_number(base_checkpoint_dir)
+
+    # 2. Data Loaders
+    train_loader, val_loader, traj_loader = get_data_loaders(current_config['data_params'])
     
     for round_idx in range(args.rounds):
         print(f"\n{'='*20} STARTING ROUND {round_idx+1}/{args.rounds} {'='*20}")
-        
         # 1. Setup Directories & Logging
-        run_number = get_next_run_number(base_checkpoint_dir)
-        checkpoint_dir = os.path.join(base_checkpoint_dir, f'run_{run_number}_round_{round_idx+1}')
+        checkpoint_dir = os.path.join(base_checkpoint_dir, f'run_{run_number}/round_{round_idx+1}')
         os.makedirs(checkpoint_dir, exist_ok=True)
         
         # Init WandB for this round
@@ -163,13 +158,8 @@ def main():
             config=current_config,
             reinit=True
         )
-
-        # 2. Data Loaders
-        train_loader, val_loader, traj_loader = get_data_loaders(current_config['data_params'])
         
         # 3. Model Initialization
-        # On the very first round, we use the config's string schedule.
-        # On subsequent rounds, we will manually overwrite the schedule.
         model = DiffusionModel(**current_config['model_params']).to(device)
         
         # APPLY CUSTOM SCHEDULE (if not first round)
@@ -181,7 +171,6 @@ def main():
             model.timesteps = len(current_noise_levels)
             
             # 2. Update betas/alphas based on noise levels (sqrtOneMinusAlphasCumprod)
-            # We need to inverse the noise levels to betas
             new_betas = betas_from_sqrtOneMinusAlphasCumprod(current_noise_levels.to(device))
             model.compute_schedule_variables(new_betas)
             
@@ -190,13 +179,14 @@ def main():
             
             # 4. Update U-Net Sigmas (Crucial for preconditioning)
             model.unet.sigmas = (model.sqrtAlphasCumprod / model.sqrtOneMinusAlphasCumprod).ravel()
-            # 5. Load Weights from Previous Round? 
-            # Usually in sequential learning (like Generalized DDPM), you restart training 
-            # OR you finetune. Here we assume training from scratch with new schedule, 
-            # but if you want to finetune, uncomment below:
-            prev_ckpt = os.path.join(base_checkpoint_dir, f'run_{run_number}_round_{round_idx}', 'final_model.pth')
-            prev_ckpt = {key[5:]:prev_ckpt[key] for key in prev_ckpt if 'unet' in key and not 'sigmas' in key}
-            model.unet.load_state_dict(prev_ckpt)
+            
+            # 5. Load Weights from Previous Round
+            prev_ckpt_path = os.path.join(base_checkpoint_dir, f'run_{run_number}/round_{round_idx}', 'final_model.pth')
+            print(f"Loading weights from previous round: {prev_ckpt_path}")
+            prev_ckpt = torch.load(prev_ckpt_path)
+            # Filter keys to ensure compatibility (removing old sigmas if they exist in state dict)
+            prev_ckpt = {key: prev_ckpt[key] for key in prev_ckpt if 'unet' in key and not 'sigmas' in key}
+            model.load_state_dict(prev_ckpt, strict=False)
         
         else:
             if config['checkpoint'] != "":
@@ -206,11 +196,12 @@ def main():
                 print(f"Checkpoint loaded from {config['checkpoint']}")
 
         print(f"Model Parameters: {count_parameters(model)}")
+        print("Current noise levels:", model.sqrtOneMinusAlphasCumprod.ravel())
+        print("Current weights:", model.weights)
         
         # 4. Train
         criterion = nn.MSELoss()
         
-        # Select trainer
         if current_config['data_params']['sequence_length'][0] == 2:
             train_func = train_diffusion_model
         else:
@@ -226,15 +217,26 @@ def main():
 
         # 5. Evaluate & Adapt Schedule
         print("Evaluating for schedule adaptation...")
-        mse_own, mse_prev, mse_clean = evaluate_model_for_adaptation(trained_model, val_loader, device)
+        mse_ancestor, mse_own, mse_prev, mse_clean = evaluate_model_for_adaptation(trained_model, val_loader, device)
+
+        # --- SAVE SCHEDULE PARAMS ---
+        # We extract what was actually used in the trained model for this round
+        schedule_save_path = os.path.join(checkpoint_dir, "schedule_params.json")
+        schedule_data = {
+            "noise_levels": trained_model.sqrtOneMinusAlphasCumprod.ravel().cpu().tolist(),
+            "weights": trained_model.weights.cpu().tolist(),
+            "timesteps": trained_model.timesteps,
+            "mse_ancestor": mse_ancestor.cpu().tolist(),
+            "mse_own": mse_own.cpu().tolist(),
+            "mse_prev": mse_prev.cpu().tolist(),
+            "mse_clean": mse_clean.cpu().tolist()
+        }
+        with open(schedule_save_path, 'w') as f:
+            json.dump(schedule_data, f, indent=4)
+        print(f"Saved schedule parameters to {schedule_save_path}")
+        # ----------------------------
         
         # Get current noise levels from model (ensure sorted Low -> High)
-        # In DiffusionModel code: alphas = sqrtOneMinusAlphasCumprod
-        # Usually index 0 is high noise (T) or low noise (0)? 
-        # Looking at your delete_steps: new_noise_levels = self.sqrtOneMinusAlphasCumprod.ravel()
-        # In standard DDPM, index 0 is t=1 (Small noise), index T is t=T (Big Noise).
-        # We assume index 0 = Low Noise.
-        
         current_noise_levels_tensor = trained_model.sqrtOneMinusAlphasCumprod.ravel().cpu()
         current_weights_tensor = trained_model.weights.cpu()
         
@@ -248,7 +250,7 @@ def main():
             prev_pred_errors=mse_prev.cpu(),
             clean_errors=mse_clean.cpu(),
             tau=args.tau,
-            incr=args.incr
+            incr=10**args.log_incr
         )
         
         current_noise_levels = new_levels
