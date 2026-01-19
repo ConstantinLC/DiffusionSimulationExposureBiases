@@ -1,46 +1,41 @@
 {
     "train_params": {
-        "num_epochs": 161,
+        "num_epochs": 201,
         "learning_rate_start": 0.0001,
         "learning_rate_end": 0.00001,
         "T_max": 100,
         "device": "cuda",
-        "channels_per_frame": 2,
-        "epoch_sampling_frequency": 20,
-        "first_ar_step_noising_step_limit": 5,
-        "backgrad": false,
-        "n_proxy_steps": 2
+        "epoch_sampling_frequency": 50
     },
     "data_params": {
-        "dataset_name": "KolmogorovFlow",
-        "data_path": "/mnt/SSD2/constantin/sda/data",
+        "dataset_name": "TransonicFlow",
+        "data_path": "/mnt/SSD2/constantin/autoreg-pde-diffusion/data",
         "resolution": 64,
-        "sequence_length": [2, 1],
+        "sequence_length": [2, 2],
         "trajectory_sequence_length": [64, 1],
         "frames_per_time_step": 1,
-        "limit_trajectories_train": 819,
-        "limit_trajectories_val": 50,
-        "batch_size": 64,
-        "val_batch_size": 64
+        "limit_trajectories_train": -1,
+        "limit_trajectories_val": 1000,
+        "batch_size": 64
     },
     "loss_params": {
         "name": "mse",
         "image_size": [64, 64],
-        "eval_traj_metric": "vorticity_corr"
+        "eval_traj_metric": "mse"
     },
     "model_params": {
         "dimension": 2,
-        "dataSize": [64, 64],
-        "condChannels": 2,
-        "dataChannels": 2,
+        "dataSize": [128, 64],
+        "condChannels": 5,
+        "dataChannels": 5,
         "diffSchedule": "Log-2-Min+",
         "diffSteps": 100,
         "inferenceSamplingMode": "ddpm",
         "inferenceConditioningIntegration": "clean",
         "diffCondIntegration": "clean",
-        "padding_mode": "circular"
+        "architecture": "ACDM"
     },
-    "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/run_628/round_1/best_model.pth",
+    "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/run_560/best_model.pth",
     "wandb_params": {
         "project": "multi-steps-diffusion-training",
         "entity": "cleclei",

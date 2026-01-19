@@ -59,6 +59,9 @@ def sigmoid_beta_schedule(timesteps):
     betas = torch.sigmoid(betas) * (beta_end - beta_start) + beta_start
     return torch.clip(betas, 0.0001, 0.9999)
 
+def psd_beta_schedule(timesteps):
+    return torch.Tensor([ 4.53887314e-4, 2.85259073e-5, 2.85267210e-5, 2.85275348e-5, 3.43625704e-5, 4.60325957e-5, 4.60347148e-5, 4.60368341e-5, 4.10608473e-5, 3.85733780e-5, 3.85748659e-5, 3.85763540e-5, 9.50367681e-5, 9.50458010e-5, 9.50548356e-5, 9.24530131e-5, 8.72393612e-5, 8.72469726e-5, 8.72545853e-5, 1.11271477e-4, 1.23289835e-4, 1.23305037e-4, 1.23320243e-4, 1.38707811e-4, 1.38727053e-4, 1.38746301e-4, 1.77679095e-4, 2.55551583e-4, 2.55616906e-4, 2.55682263e-4, 2.67478209e-4, 2.73416620e-4, 2.73491397e-4, 2.73566215e-4, 4.05702254e-4, 4.05866915e-4, 4.06031710e-4, 4.71263714e-4, 6.01681417e-4, 6.02043655e-4, 6.02406330e-4, 6.51330849e-4, 6.76051886e-4, 6.76509241e-4, 6.76967216e-4, 7.92570006e-4, 7.93198671e-4, 7.93828335e-4, 9.96352187e-4, 1.40153499e-3, 1.40350204e-3, 1.40547463e-3, 2.23737102e-3, 2.65827770e-3, 2.66536298e-3, 2.67248612e-3, 3.71762129e-3, 3.73149357e-3, 3.74546977e-3, 4.59707837e-3, 6.30109965e-3, 6.34105527e-3, 6.38152085e-3, 8.53294772e-3, 9.67068796e-3, 9.76512342e-3, 9.86142141e-3, 1.84721510e-2, 1.88197930e-2, 1.91807712e-2, 2.46602855e-2, 3.57507445e-2, 3.70762479e-2, 3.85038253e-2, 4.00154242e-2, 4.16676139e-2, 4.34792922e-2, 4.54556727e-2, 7.70881607e-2, 8.35271121e-2, 9.11397525e-2, 1.05886062e-1, 1.30967473e-1, 1.50704915e-1, 1.77447059e-1, 1.88729694e-1, 2.15995741e-1, 2.75503275e-1, 3.80268488e-1, 7.68084062e-2, 8.31987712e-2, 9.07489743e-2, 1.24347840e-1, 1.98059165e-1, 2.46974784e-1, 3.27976779e-1, 2.19751730e-1, 1.09715958e-1, 1.23237027e-1, 1.40559114e-1 ])
+
 def low_nl_max_out_beta_schedule(timesteps, min_log_nl):
     noise_levels = torch.linspace(10**min_log_nl, 10**(-0.0001), timesteps)
     betas = betas_from_sqrtOneMinusAlphasCumprod(noise_levels)
@@ -177,6 +180,43 @@ def adapt_schedule(noise_levels, weights, own_pred_errors, prev_pred_errors, cle
                 indent += 1
     
     return noise_levels, weights
+
+
+# --- The Schedule Adaptation Function ---
+def adapt_schedule(noise_levels, own_pred_errors, prev_pred_errors, clean_errors, tau, log_incr, index_end_nl_min):
+    # Ensure inputs are on CPU for logic processing
+    noise_levels = noise_levels.cpu().clone()
+    own_pred_errors = own_pred_errors.cpu()
+    prev_pred_errors = prev_pred_errors.cpu()
+    clean_errors = clean_errors.cpu()
+
+    own_ratio = own_pred_errors / clean_errors
+    prev_ratio = prev_pred_errors / clean_errors
+
+    T = len(noise_levels)
+    indent = 0
+    if own_ratio[0] > tau:
+        noise_levels[:index_end_nl_min] *= 10**log_incr
+
+    for i in range(index_end_nl_min, T-1):
+        new_level = None
+        idx = i + indent
+        if noise_levels[idx] < noise_levels[0]:
+            noise_levels[idx] = noise_levels[0]
+        else:
+            if own_ratio[i] > tau:
+                new_level = noise_levels[idx]
+            
+            elif prev_ratio[i] > tau:
+                if i < T - 1:
+                    new_level = (noise_levels[idx] + noise_levels[idx + 1]) / 2
+
+            if new_level is not None:
+                noise_levels = torch.cat((noise_levels[:idx+1], torch.tensor([new_level]), noise_levels[idx+1:]))
+                indent += 1
+
+    noise_levels = noise_levels[-T:]
+    return noise_levels
 
 def run_dynamic_checkpoint_inference(
     model, 

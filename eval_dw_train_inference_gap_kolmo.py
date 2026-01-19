@@ -147,12 +147,11 @@ def main():
             condChannels=2,
             dataChannels=2,
             diffSchedule=name,
-            diffSteps=10,
+            diffSteps=100,
             inferenceSamplingMode="ddpm",
             inferenceConditioningIntegration="clean",
             diffCondIntegration="clean",
             inferenceInitialSampling="random",
-            x0_estimate_type="mean"
         ).to(args.device)
         
         # Load weights
@@ -200,16 +199,20 @@ def main():
         for j in range(len(mse_clean)):
             prev_ratio = mse_clean_prev_pred[j]/mse_clean[j]
             own_ratio = mse_clean_own_pred[j]/mse_clean[j]
-            print(alphas[j])
+            print(alphas[j], mse_clean[j])
             if own_ratio > tau:
                 print("Own error too high", own_ratio)
             elif prev_ratio > tau:
                 print("Own error good, Prev error too high", prev_ratio)
             else:
                 print("All good")
-
-        print("Own-Pred error:", list(zip(mse_ancestor/mse_clean, mse_clean_prev_pred/mse_clean, alphas)))
         #print("Prev-Pred error:", list(zip(alphas, )))
+
+        # --- The Schedule Adaptation Function ---
+        noise_levels = model.sqrtOneMinusAlphasCumprod.ravel()
+        print(noise_levels)
+        new_noise_levels = adapt_schedule(noise_levels, torch.flip(mse_clean_own_pred, [0]), torch.flip(mse_clean_prev_pred, [0]), torch.flip(mse_clean, [0]), tau, 0.1, 85)
+        print(new_noise_levels)
 
         # Grid and title
         axes[1,i].grid(True, which='both', linestyle='--', alpha=0.3)

@@ -46,9 +46,10 @@ def get_data_loaders(data_params):
         
         trainSet = TurbulenceDataset("Training", [data_params["data_path"]], filterTop=['128_tra'], filterSim=[[0,1,2,14,15,16,17,18]], excludefilterSim=True, filterFrame=[(0,1000)],
                     sequenceLength=[data_params["sequence_length"]], randSeqOffset=True, simFields=["dens", "pres"], simParams=["mach"], printLevel="sim")
-        
-        print(len(trainSet))
-        
+
+        valSet = TurbulenceDataset("Training", [data_params["data_path"]], filterTop=['128_tra'], filterSim=[(16,19)], excludefilterSim=True,
+                        filterFrame=[(500,750)], sequenceLength=[data_params["sequence_length"]], randSeqOffset=False, simFields=["dens", "pres"], simParams=["mach"], printLevel="sim")
+
         testSet = TurbulenceDataset("Test Interpolate Mach 0.66-0.68", [data_params["data_path"]], filterTop=['128_tra'], filterSim=[(16,19)],
                         filterFrame=[(500,750)], sequenceLength=[[60,2]], randSeqOffset=False, simFields=["dens", "pres"], simParams=["mach"], printLevel="sim")
         
@@ -66,6 +67,9 @@ def get_data_loaders(data_params):
         trainSet.transform = transTrain
         trainSet.printDatasetInfo()
         trainSampler = RandomSampler(trainSet)
+
+        valSet.transform = transTrain
+        valSampler = RandomSampler(valSet)
         
         transTest = Transforms(p_d_test)
         testSet.transform = transTest
@@ -76,7 +80,8 @@ def get_data_loaders(data_params):
         ### DATA LOADERS
         train_loader = DataLoader(trainSet, sampler=trainSampler,
                     batch_size=p_d.batch, drop_last=True, num_workers=4)
-        val_loader = None
+        val_loader = DataLoader(valSet, sampler=valSampler,
+                    batch_size=p_d.batch, drop_last=True, num_workers=4)
         traj_loader = DataLoader(testSet, sampler=testSampler,
                         batch_size=p_d_test.batch, drop_last=False, num_workers=4)
 

@@ -233,7 +233,7 @@ class UnetACDM(nn.Module):
         else:
             block_klass = partial(ResnetBlock, groups=resnet_block_groups)
         
-        self.register_buffer("sigmas", torch.ravel(sigmas))
+        self.sigmas = torch.ravel(sigmas).to('cuda')
 
         # time embeddings
         if with_time_emb:

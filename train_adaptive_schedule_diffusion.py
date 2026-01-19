@@ -14,7 +14,7 @@ from src.trainer import train_diffusion_model, train_diffusion_model_multisteps
 from src.utils import get_next_run_number, count_parameters
 from src.diffusion_utils import betas_from_sqrtOneMinusAlphasCumprod
 
-# --- The Schedule Adaptation Function ---
+"""# --- The Schedule Adaptation Function ---
 def adapt_schedule(noise_levels, weights, own_pred_errors, prev_pred_errors, clean_errors, tau, incr):
     # Ensure inputs are on CPU for logic processing
     noise_levels = noise_levels.cpu().clone()
@@ -64,6 +64,80 @@ def adapt_schedule(noise_levels, weights, own_pred_errors, prev_pred_errors, cle
 
     return noise_levels, weights
 
+# --- The Schedule Adaptation Function ---
+def adapt_schedule(noise_levels, own_pred_errors, prev_pred_errors, clean_errors, tau, log_incr, index_end_nl_min):
+    # Ensure inputs are on CPU for logic processing
+    noise_levels = noise_levels.cpu().clone()
+    weights = weights.cpu().clone()
+    own_pred_errors = own_pred_errors.cpu()
+    prev_pred_errors = prev_pred_errors.cpu()
+    clean_errors = clean_errors.cpu()
+
+    own_ratio = own_pred_errors / clean_errors
+    prev_ratio = prev_pred_errors / clean_errors
+
+    T = len(noise_levels)
+    indent = 0
+    if own_ratio[0] > tau:
+        noise_levels[:index_end_nl_min] *= 10**log_incr
+
+    for i in range(index_end_nl_min, T-1):
+        new_level = None
+        idx = i + indent
+        if noise_levels[idx] < noise_levels[0]:
+            noise_levels[idx] = noise_levels[0]
+        else:
+            if own_ratio[i] > tau:
+                new_level = noise_levels[idx]
+            elif prev_ratio[i] > tau:
+                if i < T - 1:
+                    new_level = (noise_levels[idx] + noise_levels[idx + 1]) / 2
+
+            if new_level is not None:
+                noise_levels = torch.cat((noise_levels[:idx+1], torch.tensor([new_level]), noise_levels[idx+1:]))
+                indent += 1
+
+    return noise_levels"""
+
+
+
+# --- The Schedule Adaptation Function ---
+def adapt_schedule(noise_levels, own_pred_errors, prev_pred_errors, clean_errors, tau, log_incr, index_end_nl_min):
+    # Ensure inputs are on CPU for logic processing
+    noise_levels = noise_levels.cpu().clone()
+    own_pred_errors = own_pred_errors.cpu()
+    prev_pred_errors = prev_pred_errors.cpu()
+    clean_errors = clean_errors.cpu()
+
+    own_ratio = own_pred_errors / clean_errors
+    prev_ratio = prev_pred_errors / clean_errors
+
+    T = len(noise_levels)
+    indent = 0
+    if own_ratio[0] > tau:
+        noise_levels[:index_end_nl_min] *= 10**log_incr
+
+    for i in range(index_end_nl_min, T-1):
+        new_level = None
+        idx = i + indent
+        if noise_levels[idx] < noise_levels[0]:
+            noise_levels[idx] = noise_levels[0]
+        else:
+            if own_ratio[i] > tau:
+                new_level = noise_levels[idx]
+            
+            elif prev_ratio[i] > tau:
+                if i < T - 1:
+                    new_level = (noise_levels[idx] + noise_levels[idx + 1]) / 2
+
+            if new_level is not None:
+                noise_levels = torch.cat((noise_levels[:idx+1], torch.tensor([new_level]), noise_levels[idx+1:]))
+                indent += 1
+
+    noise_levels = noise_levels[-T:]
+    return noise_levels, index_end_nl_min - indent
+
+
 # --- Evaluation Function ---
 def evaluate_model_for_adaptation(model, val_loader, device):
     """
@@ -105,6 +179,8 @@ def evaluate_model_for_adaptation(model, val_loader, device):
             mse_own_list.append(batch_mse_own)
             mse_prev_list.append(batch_mse_prev)
 
+            break
+
     # Average over batches
     mse_ancestor = torch.stack(mse_ancestor_list).mean(dim=0).flip(dims=[0])
     mse_clean = torch.stack(mse_clean_list).mean(dim=0).flip(dims=[0])
@@ -117,7 +193,7 @@ def evaluate_model_for_adaptation(model, val_loader, device):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/config.json')
-    parser.add_argument('--rounds', type=int, default=5, help="Number of sequential training rounds")
+    parser.add_argument('--rounds', type=int, default=10, help="Number of sequential training rounds")
     parser.add_argument('--tau', type=float, default=1.05, help="Threshold for schedule adaptation")
     parser.add_argument('--log_incr', type=float, default=0.1, help="Logarithmic Increment factor for noise level")
     args = parser.parse_args()
@@ -134,7 +210,6 @@ def main():
     
     # Variables to carry over
     current_noise_levels = None 
-    current_weights = None
 
     base_checkpoint_dir = './checkpoints'
 
@@ -142,6 +217,8 @@ def main():
 
     # 2. Data Loaders
     train_loader, val_loader, traj_loader = get_data_loaders(current_config['data_params'])
+
+    cur_index_end_nl_min = 85
     
     for round_idx in range(args.rounds):
         print(f"\n{'='*20} STARTING ROUND {round_idx+1}/{args.rounds} {'='*20}")
@@ -174,9 +251,6 @@ def main():
             new_betas = betas_from_sqrtOneMinusAlphasCumprod(current_noise_levels.to(device))
             model.compute_schedule_variables(new_betas)
             
-            # 3. Update Weights
-            model.weights = current_weights.to(device)
-            
             # 4. Update U-Net Sigmas (Crucial for preconditioning)
             model.unet.sigmas = (model.sqrtAlphasCumprod / model.sqrtOneMinusAlphasCumprod).ravel()
             
@@ -197,10 +271,11 @@ def main():
 
         print(f"Model Parameters: {count_parameters(model)}")
         print("Current noise levels:", model.sqrtOneMinusAlphasCumprod.ravel())
-        print("Current weights:", model.weights)
         
         # 4. Train
         criterion = nn.MSELoss()
+        trained_model = model
+        
         
         if current_config['data_params']['sequence_length'][0] == 2:
             train_func = train_diffusion_model
@@ -214,7 +289,7 @@ def main():
         
         # Save Model manually if not handled by trainer
         torch.save(trained_model.state_dict(), os.path.join(checkpoint_dir, "final_model.pth"))
-
+        
         # 5. Evaluate & Adapt Schedule
         print("Evaluating for schedule adaptation...")
         mse_ancestor, mse_own, mse_prev, mse_clean = evaluate_model_for_adaptation(trained_model, val_loader, device)
@@ -224,7 +299,6 @@ def main():
         schedule_save_path = os.path.join(checkpoint_dir, "schedule_params.json")
         schedule_data = {
             "noise_levels": trained_model.sqrtOneMinusAlphasCumprod.ravel().cpu().tolist(),
-            "weights": trained_model.weights.cpu().tolist(),
             "timesteps": trained_model.timesteps,
             "mse_ancestor": mse_ancestor.cpu().tolist(),
             "mse_own": mse_own.cpu().tolist(),
@@ -238,23 +312,23 @@ def main():
         
         # Get current noise levels from model (ensure sorted Low -> High)
         current_noise_levels_tensor = trained_model.sqrtOneMinusAlphasCumprod.ravel().cpu()
-        current_weights_tensor = trained_model.weights.cpu()
         
         print(f"Old Timesteps: {len(current_noise_levels_tensor)}")
         
         # Adapt
-        new_levels, new_weights = adapt_schedule(
+        new_levels, cur_index_end_nl_min = adapt_schedule(
             noise_levels=current_noise_levels_tensor,
-            weights=current_weights_tensor,
             own_pred_errors=mse_own.cpu(),
             prev_pred_errors=mse_prev.cpu(),
             clean_errors=mse_clean.cpu(),
             tau=args.tau,
-            incr=10**args.log_incr
+            log_incr=args.log_incr,
+            index_end_nl_min=cur_index_end_nl_min
         )
         
         current_noise_levels = new_levels
-        current_weights = new_weights
+
+        print(f"New Noise Levels Timesteps: {current_noise_levels}")
         
         print(f"New Timesteps computed for next round: {len(current_noise_levels)}")
         

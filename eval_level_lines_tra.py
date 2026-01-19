@@ -34,6 +34,7 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
         mse_ancestor_all = {name: [] for name in models}
         mse_clean_all = {name: [] for name in models}
         mse_clean_prev_all = {name: [] for name in models}
+        mse_clean_prev_additional_factor_all = {name: [] for name in models}
 
         for batch_idx, sample in enumerate(val_loader):
             
@@ -44,8 +45,8 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
             total_samples += batch_size
 
             # Initial Condition (t=0)
-            conditioning_frame = data[:, 0]
-            target_frame = data[:, 1]
+            conditioning_frame = torch.cat((data[:, 0], data[:, 1]), dim=1)
+            target_frame = data[:, 2]
 
             for name in models:
                 # Store prediction
@@ -53,19 +54,24 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
                 print(model.sqrtAlphasCumprod.ravel())
                 _, x0_estimates = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="ancestor")
                 _, x0_estimates_clean = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean")
-                #_, x0_estimates_clean_previous = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean-previous-1")
+                _, x0_estimates_clean_previous = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean-previous-1")
+                _, x0_estimates_clean_previous_2 = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean-previous-10")
 
-                #_, x0_estimates_clean_previous_input_error_K1 = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean-previous-maximal-input-error-K=1")
+                #_, x0_estimates_clean_previous_additional_factor = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean-previous-1-additional-factor=3")
+
                 mse_ancestor = [(torch.mean((x0_estimates[t] - target_frame)**2)).item()
                         for t in range(len(x0_estimates))]
                 mse_clean = [(torch.mean((x0_estimates_clean[t] - target_frame)**2)).item()
                          for t in range(len(x0_estimates))]
-                #mse_clean_prev = [(torch.mean((x0_estimates_clean_previous[t] - target_frame)**2)).item()
-                #         for t in range(len(x0_estimates_clean_previous))]
+                mse_clean_prev = [(torch.mean((x0_estimates_clean_previous[t] - target_frame)**2)).item()
+                         for t in range(len(x0_estimates_clean_previous))]
+                mse_clean_prev_additional_factor = [(torch.mean((x0_estimates_clean_previous_2[t] - target_frame)**2)).item()
+                         for t in range(len(x0_estimates_clean_previous_2))]
 
                 mse_ancestor_all[name].append(mse_ancestor)
                 mse_clean_all[name].append(mse_clean)
-                #mse_clean_prev_all[name].append(mse_clean_prev)
+                mse_clean_prev_all[name].append(mse_clean_prev)
+                mse_clean_prev_additional_factor_all[name].append(mse_clean_prev_additional_factor)
             
             break
 
@@ -73,18 +79,21 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
    
     mean_mse_ancestor = {}
     mean_mse_clean = {}
-    #mean_mse_clean_prev = {}
+    mean_mse_clean_prev = {}
+    mse_clean_prev_additional_factor = {}
 
     for name in models:
         # Concatenate all batches along dimension 0
         mean_mse_ancestor[name] = torch.mean(torch.tensor(mse_ancestor_all[name]), dim=0)
         mean_mse_clean[name] = torch.mean(torch.tensor(mse_clean_all[name]), dim=0)
-        #mean_mse_clean_prev[name] = torch.mean(torch.tensor(mse_clean_prev_all[name]), dim=0)
+        mean_mse_clean_prev[name] = torch.mean(torch.tensor(mse_clean_prev_all[name]), dim=0)
+        mse_clean_prev_additional_factor[name] = torch.mean(torch.tensor(mse_clean_prev_additional_factor_all[name]), dim=0)
 
     return {
         "mse_ancestor": mean_mse_ancestor,   # (N_total, T, C, H, W)
         "mse_clean": mean_mse_clean,   # (N_total, T, C, H, W)
-        #"mse_clean_prev": mean_mse_clean_prev,   # (N_total, T, C, H, W)
+        "mse_clean_prev": mean_mse_clean_prev,   # (N_total, T, C, H, W)
+        "mse_clean_prev_additional_factor": mse_clean_prev_additional_factor,   # (N_total, T, C, H, W)
     }
 
 
@@ -117,7 +126,7 @@ def main():
         print(f"  > {name}: {path}")
 
     # 1. Load Data
-    p_d_test = DataParams(batch=100, augmentations=["normalize"], sequenceLength=[(2,2)], randSeqOffset=False,
+    p_d_test = DataParams(batch=100, augmentations=["normalize"], sequenceLength=[(3,2)], randSeqOffset=False,
             dataSize=[128,64], dimension=2, simFields=["dens", "pres"], simParams=["mach"], normalizeMode="traMixed")
     testSet = TurbulenceDataset("Training", [args.data_path], filterTop=["128_tra"], filterSim=[[0,1,2,14,15,16,17,18]], excludefilterSim=True, filterFrame=[(0,1000)],
                         sequenceLength=p_d_test.sequenceLength, randSeqOffset=p_d_test.randSeqOffset, simFields=p_d_test.simFields, simParams=p_d_test.simParams, printLevel="sim")
@@ -127,7 +136,7 @@ def main():
     testSampler = SequentialSampler(testSet)
     testLoader = DataLoader(testSet, sampler=testSampler, batch_size=p_d_test.batch, drop_last=True, num_workers=4)
 
-    condChannels =  (2 + len(p_d_test.simFields) + len(p_d_test.simParams))
+    condChannels = 2 * (2 + len(p_d_test.simFields) + len(p_d_test.simParams))
     dataChannels = 2 + len(p_d_test.simFields) + len(p_d_test.simParams)
     print(condChannels, dataChannels)
 
@@ -153,7 +162,7 @@ def main():
         ).to(args.device)
         
         # Load weights
-        ckpt = torch.load(ckpt_path, map_location=args.device) #['stateDictDecoder']
+        ckpt = torch.load(ckpt_path, map_location=args.device)['stateDictDecoder']
         print(ckpt.keys())
         if 'state_dict' in ckpt:
             model.load_state_dict(ckpt['state_dict'])
@@ -174,7 +183,8 @@ def main():
     for i, model_name in enumerate(models):
         mse_ancestor = results['mse_ancestor'][model_name]
         mse_clean = results['mse_clean'][model_name]
-        #mse_clean_prev = results['mse_clean_prev'][model_name]
+        mse_clean_prev = results['mse_clean_prev'][model_name]
+        mse_clean_prev_additional_factor = results['mse_clean_prev_additional_factor'][model_name]
         alphas = list(models[model_name].sqrtOneMinusAlphasCumprod.ravel().cpu())[::-1]
 
         axes[0,i].hist(alphas, alpha=0.2, color=colors[i], bins=np.logspace(-2.5, 0, 20))
@@ -182,10 +192,12 @@ def main():
         # Plot curves
         axes[1,i].plot(alphas, mse_clean,
                     label="Training input", color=colors[i], linestyle='dotted')
-        axes[1,i].plot(alphas, mse_ancestor,
-                    label="Inference input", color=colors[i])
-        #axes[1,i].plot(alphas[1:], mse_clean_prev[1:],
-        #            label="Training input on previous step", color="green")
+        #axes[1,i].plot(alphas, mse_ancestor,
+        #            label="Inference input", color=colors[i])
+        axes[1,i].plot(alphas[1:], mse_clean_prev[1:],
+                    label="Training input on previous step", color="green")
+        axes[1,i].plot(alphas[1:], mse_clean_prev_additional_factor[1:],
+                    label="Training input on previous step", color="red")
 
         # Grid and title
         axes[1,i].grid(True, which='both', linestyle='--', alpha=0.3)
@@ -193,8 +205,8 @@ def main():
 
         # --- Add final-value text under the title ---
         #print(model_name, "Clean:", mse_clean[0], "Ancestor:", mse_ancestor[0])
-        #print([(mse_clean_prev[i]/mse_clean[i]) for i in range(len(mse_ancestor))])
-        #print(model_name, "Clean:", mse_clean[-1], "Ancestor:", mse_ancestor[-1], "Clean on previous step:", mse_clean_prev[-1])
+        print([(mse_clean_prev[i], mse_clean_prev_additional_factor[i]) for i in range(len(mse_ancestor))])
+        print(model_name, "Clean:", mse_clean[-1], "Ancestor:", mse_ancestor[-1], "Clean on previous step:", mse_clean_prev[-1])
         print("\n")
         fig.text(
             0.2 + i*0.33,   # places 3 groups left→right
@@ -211,7 +223,7 @@ def main():
         axes[1,i].legend(fontsize=8)
         
 
-    axes[0,0].set_xscale('log')
+    #axes[0,0].set_xscale('log')
     axes[1,0].set_yscale('log')
     axes[1,0].set_ylabel('MSE w/ ground-truth')
     axes[0,0].set_ylabel('Noise Level sqrt(1-ᾱₜ) Distribution')
