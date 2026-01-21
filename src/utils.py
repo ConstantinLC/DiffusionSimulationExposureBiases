@@ -131,6 +131,111 @@ def vorticity(x: torch.Tensor) -> torch.Tensor:
     vort = vort.reshape(*batch, h, w)
     return vort
 
+
+def evaluate_trajectory(model, loader, device, metrics=['mse', 'corr', 'vort_corr'], corr_threshold=0.8):
+    """
+    Performs autoregressive rollout and computes specified metrics efficiently in a single pass.
+    
+    Args:
+        model: The neural network model.
+        loader: DataLoader returning (N, T, C, H, W).
+        device: 'cuda' or 'cpu'.
+        metrics: List of metrics to compute ['mse', 'corr', 'vort_corr'].
+        corr_threshold: Threshold for 'time_under_threshold' (specific to 'vort_corr').
+    
+    Returns:
+        Dictionary containing time-series arrays and scalar summaries for each metric.
+    """
+    model.eval()
+    
+    # storage for all batches [metric_name -> list of lists]
+    history = {m: [] for m in metrics}
+
+    with torch.no_grad():
+        for sample in loader:
+            data = sample["data"].to(device)
+            # Shapes: N (Batch), T (Time), C, H, W
+            T = data.shape[1]
+            
+            current_pred = data[:, 0] # Initial frame (t=0)
+            
+            # Temporary buffers for this batch
+            batch_results = {m: [] for m in metrics}
+
+            for t in range(1, T):
+                # 1. Autoregressive Step
+                predicted_frame = model(current_pred, None)
+                ground_truth_frame = data[:, t]
+                
+                # 2. Compute Metrics
+                # --- MSE ---
+                if 'mse' in metrics:
+                    mse_val = torch.mean((predicted_frame - ground_truth_frame)**2, dim=list(range(1, len(predicted_frame.shape))))
+                    batch_results['mse'].append(mse_val.cpu().numpy())
+
+                # --- Pixel Correlation ---
+                if 'corr' in metrics:
+                    corr_val = compute_image_correlation(predicted_frame.unsqueeze(1), ground_truth_frame.unsqueeze(1))
+                    batch_results['corr'].append(corr_val.cpu().numpy())
+
+                # --- Vorticity Correlation ---
+                if 'vort_corr' in metrics:
+                    # Calculate vorticity
+                    pred_vort = vorticity(predicted_frame)
+                    gt_vort = vorticity(ground_truth_frame)
+                    
+                    # Compute correlation (unsqueeze to add channel dim for helper function)
+                    v_corr_val = compute_image_correlation(pred_vort.unsqueeze(1), gt_vort.unsqueeze(1))
+                    batch_results['vort_corr'].append(v_corr_val.cpu().numpy())
+                
+                # 3. Update State
+                current_pred = predicted_frame
+            
+            # Append batch results to history
+            for m in metrics:
+                # Stack to get shape (Time, Batch) -> Transpose to (Batch, Time) later if needed
+                # Here we append list of shape (Time, Batch)
+                history[m].append(np.array(batch_results[m]))
+
+    # --- Aggregation ---
+    output = {}
+    
+    for m in metrics:
+        # Concatenate all batches along the batch dimension
+        # history[m] is a list of arrays, each array is (Time, Batch_Size)
+        # We want to average over all batches.
+        
+        # 1. Combine all batches: shape (Total_Batches, Time_Steps)
+        # Transpose internal arrays to be (Batch, Time) before stacking
+        full_data = np.concatenate([np.transpose(batch_arr) for batch_arr in history[m]], axis=0)
+        print(full_data.shape)
+        # 2. Compute mean over batch dimension -> shape (Time_Steps,)
+        metric_curve = np.mean(full_data, axis=0)
+        output[f'{m}_per_ts'] = metric_curve
+        
+        # 3. Compute scalar summary (mean over time)
+        output[f'mean_{m}'] = np.mean(metric_curve)
+
+        # 4. Special metric: Time until correlation drops (only for vort_corr)
+        if m == 'vort_corr':
+            drop_indices = np.where(metric_curve < corr_threshold)[0]
+            if len(drop_indices) > 0:
+                time_under = drop_indices[0] + 1 # +1 because loop starts at t=1
+            else:
+                time_under = len(metric_curve) + 1
+            output['vort_corr_time_under_threshold'] = time_under
+
+        # 4. Special metric: Time until correlation drops (only for vort_corr)
+        if m == 'corr':
+            drop_indices = np.where(metric_curve < corr_threshold)[0]
+            if len(drop_indices) > 0:
+                time_under = drop_indices[0] + 1 # +1 because loop starts at t=1
+            else:
+                time_under = len(metric_curve) + 1
+            output['corr_time_under_threshold'] = time_under
+
+    return output
+
 def evaluate_trajectory_vorticity(model, loader, device, threshold=0.8):
     """
     Performs autoregressive rollout and computes vorticity correlation.
@@ -187,8 +292,8 @@ def evaluate_trajectory_mse(model, loader, device, threshold=0.8):
     with torch.no_grad():
         for sample in loader:
             data = sample["data"].to(device)
-            N, T, C, H, W = data.shape
-            
+            T = data.shape[1]
+
             current_pred = data[:, 0] # Initial frame
             errors_for_batch = []
 

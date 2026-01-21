@@ -123,10 +123,12 @@ def adapt_schedule(noise_levels, own_pred_errors, prev_pred_errors, clean_errors
         if noise_levels[idx] < noise_levels[0]:
             noise_levels[idx] = noise_levels[0]
         else:
-            if own_ratio[i] > tau:
-                new_level = noise_levels[idx]
+            #if own_ratio[i] > tau:
+            #    new_level = noise_levels[idx]
             
-            elif prev_ratio[i] > tau:
+            #elif prev_ratio[i] > tau:
+            if prev_ratio[i] > tau:
+                print(noise_levels[idx], prev_ratio[i])
                 if i < T - 1:
                     new_level = (noise_levels[idx] + noise_levels[idx + 1]) / 2
 
@@ -269,8 +271,18 @@ def main():
                 model.unet.load_state_dict(checkpoint)
                 print(f"Checkpoint loaded from {config['checkpoint']}")
 
-        print(f"Model Parameters: {count_parameters(model)}")
+            if 'noise_levels_json' in config and config['noise_levels_json'] != "":
+                print('a')
+                with open(config['noise_levels_json']) as f:
+                    file = json.load(f)
+                    model.compute_schedule_variables(sigmas = torch.tensor(file['noise_levels']))
+            
+                print(f"Noise Levels loaded from {config['checkpoint']}")
+
         print("Current noise levels:", model.sqrtOneMinusAlphasCumprod.ravel())
+        print(f"Model has {count_parameters(model)} parameters.")
+
+        print(f"Model Parameters: {count_parameters(model)}")
         
         # 4. Train
         criterion = nn.MSELoss()
@@ -281,7 +293,7 @@ def main():
             train_func = train_diffusion_model
         else:
             train_func = train_diffusion_model_multisteps
-            
+
         trained_model = train_func(
             model, train_loader, val_loader, traj_loader,
             current_config['train_params'], criterion, current_config, checkpoint_dir

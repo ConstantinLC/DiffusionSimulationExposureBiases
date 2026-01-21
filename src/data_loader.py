@@ -1,7 +1,7 @@
 import copy
 
 from torch.utils.data import DataLoader, SequentialSampler, RandomSampler, SubsetRandomSampler
-from src.dataset import KolmogorovDataset_Rozet, TurbulenceDataset
+from src.dataset import KolmogorovDataset_Rozet, TurbulenceDataset, KuramotoSivashinskyDataset
 from src.data_transformations import DataParams, Transforms
 
 def get_data_loaders(data_params):
@@ -36,6 +36,37 @@ def get_data_loaders(data_params):
             limit_trajectories=data_params["limit_trajectories_val"],
             sequenceLength=data_params["trajectory_sequence_length"],
             framesPerTimeStep=data_params["frames_per_time_step"]
+        )
+
+        train_loader = DataLoader(trainSet, batch_size=data_params["batch_size"], shuffle=True, num_workers=0)
+        val_loader = DataLoader(valSet, batch_size=data_params["val_batch_size"], shuffle=False, num_workers=0)
+        traj_loader = DataLoader(trajSet, batch_size=data_params["batch_size"], shuffle=False, num_workers=0)
+
+    elif data_params["dataset_name"] == "KuramotoSivashinsky":
+        
+        trainSet = KuramotoSivashinskyDataset(
+            "Test",
+            data_params["data_path"],
+            mode="train",
+            resolution=data_params["resolution"],
+            sequenceLength=data_params["sequence_length"],
+            limit_trajectories=data_params["limit_trajectories_train"]
+        )
+        valSet = KuramotoSivashinskyDataset(
+            "Test",
+            data_params["data_path"],
+            mode="valid",
+            resolution=data_params["resolution"],
+            limit_trajectories=data_params["limit_trajectories_val"],
+            sequenceLength=data_params["sequence_length"],
+        )
+        trajSet = KuramotoSivashinskyDataset(
+            "Test",
+            data_params["data_path"],
+            mode="valid",
+            resolution=data_params["resolution"],
+            limit_trajectories=data_params["limit_trajectories_val"],
+            sequenceLength=data_params["trajectory_sequence_length"],
         )
 
         train_loader = DataLoader(trainSet, batch_size=data_params["batch_size"], shuffle=True, num_workers=0)

@@ -27,11 +27,6 @@ class KolmogorovDataset_Rozet(Dataset):
         self.mode = mode
         self.resolution = resolution
 
-        if self.resolution < 64:
-            self.resolution_downfactor = 64//self.resolution
-        else:
-            self.resolution_downfactor = None
-
         self.sequenceLength = sequenceLength
         self.limit_trajectories = limit_trajectories
         self.usegrid = usegrid
@@ -46,7 +41,6 @@ class KolmogorovDataset_Rozet(Dataset):
         self.data = torch.Tensor(np.array(h5py.File(file_path, mode='r')["x"]))
 
         self.n_trajectories = self.data.shape[0]
-        print("aaaa", self.n_trajectories)
         if self.limit_trajectories is not None:
             self.n_trajectories = min(self.n_trajectories, self.limit_trajectories)
         self.n_frames = self.data.shape[1] - self.seqLength + 1  # Ignore timestep for now
@@ -59,10 +53,7 @@ class KolmogorovDataset_Rozet(Dataset):
         idx_sim = idx // self.n_frames
         idx_frame = idx % self.n_frames
         data_idx = self.data[idx_sim][idx_frame:idx_frame+self.seqLength]
-        #data_idx_lf, data_idx_hf = self.separateFrequencies(data_idx, cutoff_frequency=8)
-        if self.resolution_downfactor is not None:
-            data_idx = data_idx[..., ::self.resolution_downfactor, ::self.resolution_downfactor]
-        return {"data" : data_idx, "simParameters": {}} # data_idx_lf + data_idx_hf/4 # data_idx_lf*4 + data_idx_hf
+        return {"data" : data_idx, "simParameters": {}}
 
 
 
@@ -366,131 +357,59 @@ class TurbulenceDataset(Dataset):
         return s
 
 
-import xarray as xr
 
-class WeatherBenchDataset(Dataset):
-    """
-    Dataset for WeatherBench data (NetCDF format).
-    Assumes data is stored in individual .nc files per variable or combined.
-    Loads selected years into memory for efficient training.
-    
-    Structure: (Time, Channels, Lat, Lon)
-    
-    Args:
-        dataDir (str): Path to the directory containing .nc files.
-        vars (List[str]): List of variable names to load (e.g., ['z', 't']). 
-                          These must match the variable names inside the NetCDF files.
-        years (List[str]): List of years to load (e.g., ['2016', '2017']).
-        sequenceLength (int): Length of the time sequence to return.
-        levels (List[int], optional): Pressure levels to select if data has a level dimension 
-                                      (e.g., [500, 850]). If None, assumes single level or surface data.
-        file_pattern (str): F-string pattern to locate files. Default assumes WeatherBench standard 
-                            like "{var}_{resolution}.nc" or just "{var}.nc".
-        resolution (str): Optional resolution string used in file naming (e.g. "5.625deg").
-    """
-    def __init__(self, dataDir: str, vars: List[str], years: List[str], sequenceLength: int, 
-                 levels: Optional[List[int]] = None, 
-                 file_pattern: str = "{var}.nc", 
-                 resolution: str = "") -> None:
+class KuramotoSivashinskyDataset(Dataset):
+    def __init__(self, name: str, folderPath: str, mode: str, resolution: str, 
+                 sequenceLength: List[Tuple[int, int]] = [],
+                 framesPerTimeStep: int = 1, limit_trajectories: Optional[int] = None, 
+                 usegrid: bool = False, conditioned: bool = False) -> None:
         super().__init__()
-        self.dataDir = dataDir
-        self.vars = vars
-        self.years = years
-        self.levels = levels
-        self.seq_len = sequenceLength
-        self.resolution = resolution
+        self.name = name
+        self.folderPath = folderPath
+        self.mode = mode
+        self.resolution = resolution 
+
+        self.sequenceLength = sequenceLength
+        self.limit_trajectories = limit_trajectories
+        self.usegrid = usegrid
+        self.conditioned = conditioned
         
-        data_arrays = []
+        # Parse sequence length configuration
+        self.seqLength = sequenceLength[0]  
+        self.timestep = sequenceLength[1] 
 
-        print(f"Loading WeatherBench data from {dataDir} for years {years}...")
+        # Construct filename: e.g., "KS_train_512.h5"
+        if self.mode == "train":
+            filename = f"KS_{self.mode}_512.h5"
+        else:
+            filename = f"KS_{self.mode}.h5"
+        file_path = os.path.join(folderPath, filename)
 
-        # 1. Iterate over requested variables (e.g., geopotential, temperature)
-        for var_name in self.vars:
-            # Construct filename
-            fname = file_pattern.format(var=var_name, resolution=self.resolution)
-            fpath = os.path.join(dataDir, fname)
-            
-            if not os.path.isfile(fpath):
-                raise FileNotFoundError(f"Could not find WeatherBench file: {fpath}")
+        # Load Data
+        with h5py.File(file_path, mode='r') as f:
+            for k in f.keys():
+                self.data = torch.tensor(np.array(f[k]["pde_140-256"])).to(torch.float)
 
-            # Open dataset using Xarray
-            # We use chunks=None to load lazily initially, then we select years
-            ds = xr.open_dataset(fpath)
-            
-            # 2. Select specific Years
-            # WeatherBench uses standard datetime64 indexing
-            try:
-                ds_subset = ds.sel(time=ds.time.dt.year.isin([int(y) for y in self.years]))
-            except Exception as e:
-                raise ValueError(f"Error slicing years {self.years} for variable {var_name}. Ensure data has 'time' coordinate. Error: {e}")
+        self.data = self.data[:, ::self.timestep, ::4]
 
-            if ds_subset.time.size == 0:
-                raise ValueError(f"No data found for years {self.years} in file {fpath}")
-
-            # 3. Select Pressure Levels (if applicable)
-            da = ds_subset[var_name] # Extract the DataArray
-            
-            if 'level' in da.dims and self.levels is not None:
-                # If the variable has levels (e.g., z at 500, 850), slice them
-                # This might result in (Time, Level, Lat, Lon)
-                da = da.sel(level=self.levels)
-            elif 'level' in da.dims and self.levels is None:
-                # If levels exist but none specified, warn or select all? 
-                # Usually better to error out to prevent massive memory usage
-                print(f"Warning: Variable {var_name} has levels but no levels specified. Loading all levels.")
-            
-            # 4. Homogenize Dimensions
-            # We want final shape: (Time, Channels, Lat, Lon)
-            # If we have (Time, Level, Lat, Lon), we merge Level into Channels conceptually
-            # If we have (Time, Lat, Lon), we add a Channel dim
-            
-            # Load actual data into numpy/RAM here
-            vals = da.values # Shape e.g. (8760, 32, 64) or (8760, 2, 32, 64)
-            
-            # Handle NaNs (common in some raw datasets)
-            if np.isnan(vals).any():
-                print(f"Warning: NaNs found in {var_name}, replacing with 0.")
-                vals = np.nan_to_num(vals)
-
-            tensor_vals = torch.from_numpy(vals).float()
-
-            if len(tensor_vals.shape) == 3: 
-                # (Time, Lat, Lon) -> (Time, 1, Lat, Lon)
-                tensor_vals = tensor_vals.unsqueeze(1)
-            elif len(tensor_vals.shape) == 4:
-                # (Time, Level, Lat, Lon) -> (Time, Level, Lat, Lon) 
-                # We will concatenate along dim 1 later
-                pass
-            
-            data_arrays.append(tensor_vals)
-            ds.close()
-
-        # 5. Concatenate all variables along the channel dimension
-        # Result shape: (Total_Time, Total_Channels, Lat, Lon)
-        self.data = torch.cat(data_arrays, dim=1)
+        self.n_trajectories = self.data.shape[0]
         
-        self.n_time_steps = self.data.shape[0]
-        self.n_samples = self.n_time_steps - self.seq_len
-        
-        print(f"WeatherBench Loaded. Shape: {self.data.shape}. Total valid sequences: {self.n_samples}")
+        if self.limit_trajectories > 0:
+            self.n_trajectories = min(self.n_trajectories, self.limit_trajectories)
+            self.data = self.data[:self.n_trajectories]
+
+        # Calculate number of valid start frames
+        self.n_frames = self.data.shape[1] - self.seqLength + 1
 
     def __len__(self) -> int:
-        return self.n_samples
+        return self.n_trajectories * self.n_frames
 
     def __getitem__(self, idx: int) -> dict:
-        # Returns a sequence of frames
-        # Shape: (Sequence_Length, Channels, Lat, Lon)
+        idx_sim = idx // self.n_frames
+        idx_frame = idx % self.n_frames
         
-        # Check bounds
-        if idx >= self.n_samples:
-            raise IndexError
-            
-        # Slice the time dimension
-        data_slice = self.data[idx : idx + self.seq_len]
-        
-        # WeatherBench typically doesn't use simParameters like Reynolds number, 
-        # but we return an empty dict to match the interface of the other datasets
-        return {
-            "data": data_slice, 
-            "simParameters": {}
-        }
+        # Slice data: [Time, Spatial_X]
+        data_idx = self.data[idx_sim, idx_frame : idx_frame + self.seqLength]
+
+        data_idx = data_idx.unsqueeze(1)
+        return {"data": data_idx, "simParameters": {}}

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from functools import partial
 
-### MODEL BLOCK DEFINITIONS (based on Ho et al.)
+### MODEL BLOCK DEFINITIONS
 class Residual(nn.Module):
     def __init__(self, fn):
         super().__init__()
@@ -16,15 +16,12 @@ class Residual(nn.Module):
         return self.fn(x, *args, **kwargs) + x
 
 def Upsample(dim):
-    return nn.ConvTranspose2d(dim, dim, 4, 2, 1)
-    #return nn.Sequential(
-    #    nn.UpsamplingNearest2d(scale_factor=2),
-    #    nn.Conv2d(dim, dim, 3, 1, 1),
-    #)
+    # 1D Transposed Convolution
+    return nn.ConvTranspose1d(dim, dim, 4, 2, 1)
 
 def Downsample(dim, padding_mode='circular'):
-    return nn.Conv2d(dim, dim, 4, 2, 1, padding_mode=padding_mode)
-
+    # 1D Convolution with stride 2
+    return nn.Conv1d(dim, dim, 4, 2, 1, padding_mode=padding_mode)
 
 class SinusoidalPositionEmbeddings(nn.Module):
     def __init__(self, dim):
@@ -40,15 +37,15 @@ class SinusoidalPositionEmbeddings(nn.Module):
         embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
         return embeddings
 
-
 class Block(nn.Module):
-    def __init__(self, dim, dim_out, groups = 8, padding_mode='circular'):
+    def __init__(self, dim, dim_out, groups=8, padding_mode='circular'):
         super().__init__()
-        self.proj = nn.Conv2d(dim, dim_out, 3, padding = 1, padding_mode=padding_mode)
+        # 1D Conv
+        self.proj = nn.Conv1d(dim, dim_out, 3, padding=1, padding_mode=padding_mode)
         self.norm = nn.GroupNorm(groups, dim_out)
         self.act = nn.SiLU()
 
-    def forward(self, x, scale_shift = None):
+    def forward(self, x, scale_shift=None):
         x = self.proj(x)
         x = self.norm(x)
 
@@ -59,10 +56,7 @@ class Block(nn.Module):
         x = self.act(x)
         return x
 
-
 class ResnetBlock(nn.Module):
-    """https://arxiv.org/abs/1512.03385"""
-    
     def __init__(self, dim, dim_out, *, time_emb_dim=None, groups=8, padding_mode='circular'):
         super().__init__()
         self.mlp = (
@@ -70,24 +64,23 @@ class ResnetBlock(nn.Module):
             if time_emb_dim is not None else None
         )
 
-        self.block1 = Block(dim, dim_out, groups=groups)
-        self.block2 = Block(dim_out, dim_out, groups=groups)
-        self.res_conv = nn.Conv2d(dim, dim_out, 1, padding_mode=padding_mode) if dim != dim_out else nn.Identity()
+        self.block1 = Block(dim, dim_out, groups=groups, padding_mode=padding_mode)
+        self.block2 = Block(dim_out, dim_out, groups=groups, padding_mode=padding_mode)
+        # 1D Conv for residual
+        self.res_conv = nn.Conv1d(dim, dim_out, 1, padding_mode=padding_mode) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb=None):
         h = self.block1(x)
 
         if self.mlp is not None and time_emb is not None:
             time_emb = self.mlp(time_emb)
-            h = rearrange(time_emb, "b c -> b c 1 1") + h
+            # Rearrange for 1D: (batch, channel) -> (batch, channel, 1)
+            h = rearrange(time_emb, "b c -> b c 1") + h
 
         h = self.block2(h)
         return h + self.res_conv(x)
 
-
 class ConvNextBlock(nn.Module):
-    """https://arxiv.org/abs/2201.03545"""
-
     def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True, padding_mode='circular'):
         super().__init__()
         self.mlp = (
@@ -95,30 +88,29 @@ class ConvNextBlock(nn.Module):
             if time_emb_dim is not None else None
         )
 
-        self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim, padding_mode=padding_mode)
+        # 1D Depthwise Conv (kernel size 7)
+        self.ds_conv = nn.Conv1d(dim, dim, 7, padding=3, groups=dim, padding_mode=padding_mode)
 
         self.net = nn.Sequential(
             nn.GroupNorm(1, dim) if norm else nn.Identity(),
-            nn.Conv2d(dim, dim_out * mult, 3, padding=1, padding_mode=padding_mode),
+            nn.Conv1d(dim, dim_out * mult, 3, padding=1, padding_mode=padding_mode),
             nn.GELU(),
             nn.GroupNorm(1, dim_out * mult),
-            nn.Conv2d(dim_out * mult, dim_out, 3, padding=1, padding_mode=padding_mode),
+            nn.Conv1d(dim_out * mult, dim_out, 3, padding=1, padding_mode=padding_mode),
         )
 
-        self.res_conv = nn.Conv2d(dim, dim_out, 1, padding_mode=padding_mode) if dim != dim_out else nn.Identity()
+        self.res_conv = nn.Conv1d(dim, dim_out, 1, padding_mode=padding_mode) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb=None):
         h = self.ds_conv(x)
 
         if self.mlp is not None and time_emb is not None:
-            assert time_emb is not None, "time embedding must be passed in"
             condition = self.mlp(time_emb)
-            h = h + rearrange(condition, "b c -> b c 1 1")
+            # Rearrange for 1D
+            h = h + rearrange(condition, "b c -> b c 1")
 
         h = self.net(h)
         return h + self.res_conv(x)
-
-
 
 class Attention(nn.Module):
     def __init__(self, dim, heads=4, dim_head=32, padding_mode='circular'):
@@ -126,14 +118,15 @@ class Attention(nn.Module):
         self.scale = dim_head**-0.5
         self.heads = heads
         hidden_dim = dim_head * heads
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False, padding_mode=padding_mode)
-        self.to_out = nn.Conv2d(hidden_dim, dim, 1, padding_mode=padding_mode)
+        # 1D Convs
+        self.to_qkv = nn.Conv1d(dim, hidden_dim * 3, 1, bias=False, padding_mode=padding_mode)
+        self.to_out = nn.Conv1d(hidden_dim, dim, 1, padding_mode=padding_mode)
 
     def forward(self, x):
-        b, c, h, w = x.shape
+        b, c, l = x.shape  # l is length instead of h, w
         qkv = self.to_qkv(x).chunk(3, dim=1)
         q, k, v = map(
-            lambda t: rearrange(t, "b (h c) x y -> b h c (x y)", h=self.heads), qkv
+            lambda t: rearrange(t, "b (h c) l -> b h c l", h=self.heads), qkv
         )
         q = q * self.scale
 
@@ -142,9 +135,8 @@ class Attention(nn.Module):
         attn = sim.softmax(dim=-1)
 
         out = einsum("b h i j, b h d j -> b h i d", attn, v)
-        out = rearrange(out, "b h (x y) d -> b (h d) x y", x=h, y=w)
+        out = rearrange(out, "b h l d -> b (h d) l")
         return self.to_out(out)
-
 
 class LinearAttention(nn.Module):
     def __init__(self, dim, heads=4, dim_head=32, padding_mode='circular'):
@@ -152,16 +144,16 @@ class LinearAttention(nn.Module):
         self.scale = dim_head**-0.5
         self.heads = heads
         hidden_dim = dim_head * heads
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False, padding_mode=padding_mode)
+        self.to_qkv = nn.Conv1d(dim, hidden_dim * 3, 1, bias=False, padding_mode=padding_mode)
 
-        self.to_out = nn.Sequential(nn.Conv2d(hidden_dim, dim, 1, padding_mode=padding_mode), 
+        self.to_out = nn.Sequential(nn.Conv1d(hidden_dim, dim, 1, padding_mode=padding_mode), 
                                     nn.GroupNorm(1, dim))
 
     def forward(self, x):
-        b, c, h, w = x.shape
+        b, c, l = x.shape
         qkv = self.to_qkv(x).chunk(3, dim=1)
         q, k, v = map(
-            lambda t: rearrange(t, "b (h c) x y -> b h c (x y)", h=self.heads), qkv
+            lambda t: rearrange(t, "b (h c) l -> b h c l", h=self.heads), qkv
         )
 
         q = q.softmax(dim=-2)
@@ -171,9 +163,8 @@ class LinearAttention(nn.Module):
         context = torch.einsum("b h d n, b h e n -> b h d e", k, v)
 
         out = torch.einsum("b h d e, b h d n -> b h e n", context, q)
-        out = rearrange(out, "b h c (x y) -> b (h c) x y", h=self.heads, x=h, y=w)
+        out = rearrange(out, "b h c l -> b (h c) l", h=self.heads)
         return self.to_out(out)
-
 
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
@@ -184,7 +175,6 @@ class PreNorm(nn.Module):
     def forward(self, x):
         x = self.norm(x)
         return self.fn(x)
-    
 
 class FourierEmbedding(nn.Module):
     def __init__(self, out_channels, scale=16):
@@ -192,22 +182,14 @@ class FourierEmbedding(nn.Module):
         self.register_buffer('freqs', torch.randn(out_channels // 2) * scale)
 
     def forward(self, x):
-        # x is a tensor of noise levels (e.g., sigma or log-snr)
-        # shape: [batch_size]
-        
-        # Project scalar to frequencies
         x = x.ger(self.freqs.to(x.dtype))
-        
-        # Use sine and cosine to create the high-dim vector
-        # This allows the model to "see" different periodic patterns
         return torch.cat([x.sin(), x.cos()], dim=-1)
 
-
-class Unet(nn.Module):
+class Unet1D(nn.Module):
     def __init__(
         self,
         dim,
-        sigmas=None,
+        sigmas,
         init_dim=None,
         out_dim=None,
         dim_mults=(1, 2, 4, 8),
@@ -224,19 +206,21 @@ class Unet(nn.Module):
 
         # determine dimensions
         self.channels = channels
-        if sigmas is not None:
-            self.sigmas = torch.ravel(sigmas).to('cuda')
+        # Move sigmas to register_buffer generally preferred, but keeping user style
+        self.sigmas = torch.ravel(sigmas).to('cuda')
 
         init_dim = init_dim if init_dim is not None else dim // 3 * 2
-        self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3, padding_mode=self.padding_mode)
+        
+        # 1D Init Conv
+        self.init_conv = nn.Conv1d(channels, init_dim, 7, padding=3, padding_mode=self.padding_mode)
 
         dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
 
         if use_convnext:
-            block_klass = partial(ConvNextBlock, mult=convnext_mult)
+            block_klass = partial(ConvNextBlock, mult=convnext_mult, padding_mode=padding_mode)
         else:
-            block_klass = partial(ResnetBlock, groups=resnet_block_groups)
+            block_klass = partial(ResnetBlock, groups=resnet_block_groups, padding_mode=padding_mode)
 
         # time embeddings
         if with_time_emb:
@@ -250,8 +234,6 @@ class Unet(nn.Module):
         else:
             time_dim = None
             self.time_mlp = None
-            self.cond_mlp = None
-            self.sim_mlp = None
 
         # layers
         self.downs = nn.ModuleList([])
@@ -266,15 +248,15 @@ class Unet(nn.Module):
                     [
                         block_klass(dim_in, dim_out, time_emb_dim=time_dim),
                         block_klass(dim_out, dim_out, time_emb_dim=time_dim),
-                        Residual(PreNorm(dim_out, LinearAttention(dim_out))),
-                        Downsample(dim_out) if not is_last else nn.Identity(),
+                        Residual(PreNorm(dim_out, LinearAttention(dim_out, padding_mode=padding_mode))),
+                        Downsample(dim_out, padding_mode=padding_mode) if not is_last else nn.Identity(),
                     ]
                 )
             )
 
         mid_dim = dims[-1]
         self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
-        self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim)))
+        self.mid_attn = Residual(PreNorm(mid_dim, Attention(mid_dim, padding_mode=padding_mode)))
         self.mid_block2 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
@@ -285,7 +267,7 @@ class Unet(nn.Module):
                     [
                         block_klass(dim_out * 2, dim_in, time_emb_dim=time_dim),
                         block_klass(dim_in, dim_in, time_emb_dim=time_dim),
-                        Residual(PreNorm(dim_in, LinearAttention(dim_in))),
+                        Residual(PreNorm(dim_in, LinearAttention(dim_in, padding_mode=padding_mode))),
                         Upsample(dim_in) if not is_last else nn.Identity(),
                     ]
                 )
@@ -293,35 +275,19 @@ class Unet(nn.Module):
 
         out_dim = out_dim if out_dim is not None else channels
         self.final_conv = nn.Sequential(
-            block_klass(dim, dim), nn.Conv2d(dim, out_dim, 1, padding_mode=self.padding_mode)
+            block_klass(dim, dim, time_emb_dim=time_dim), # Ensure block handles time_emb if passed
+            nn.Conv1d(dim, out_dim, 1, padding_mode=self.padding_mode)
         )
-
-    # returns low and high-passed filter data separately
-    def separateFrequencies(self, data: torch.Tensor, device="cuda", cutoff_frequency=4):
-        npix = data.shape[-1]
-        fft_data = torch.fft.fft2(data)
-        kfreq = torch.fft.fftfreq(npix) * npix
-        kfreq2D = torch.meshgrid(kfreq, kfreq)
-        knrm = torch.sqrt(kfreq2D[0]**2 + kfreq2D[1]**2)
-        fft_highpass = fft_data * (knrm > cutoff_frequency).to(device=device)
-        fft_lowpass = fft_data * (knrm <= cutoff_frequency).to(device=device)
-        data_highpass = torch.real(torch.fft.ifft2(fft_highpass))
-        data_lowpass = torch.real(torch.fft.ifft2(fft_lowpass))
-        #print(data_highpass, data_lowpass)
-        return data_lowpass, data_highpass
-
 
     def forward(self, x, time):
         x = self.init_conv(x)
 
-        if self.time_mlp is not None:
-            noise_levels = torch.log(self.sigmas[time])
-            t = self.time_mlp(noise_levels)
-        else:
-            t = None
+        # Assuming time is an index tensor for sigmas
+        noise_levels = torch.log(self.sigmas[time])
+
+        t = self.time_mlp(noise_levels) if self.time_mlp is not None else None
 
         h = []
-
         interm = []
 
         # downsample
@@ -340,6 +306,7 @@ class Unet(nn.Module):
 
         # upsample
         for block1, block2, attn, upsample in self.ups:
+            # Concatenate along channel dim (dim 1)
             x = torch.cat((x, h.pop()), dim=1)
             x = block1(x, t)
             x = block2(x, t)
@@ -347,6 +314,12 @@ class Unet(nn.Module):
             x = upsample(x)
             interm.append(x)
 
-        final_conv = self.final_conv(x)
-        return final_conv
-
+        # Final blocks usually don't need time embedding if it's just a projection, 
+        # but if using ResBlock/ConvNextBlock at end, pass t
+        final_block = self.final_conv[0]
+        final_proj = self.final_conv[1]
+        
+        x = final_block(x, t)
+        final_out = final_proj(x)
+        
+        return final_out

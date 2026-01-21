@@ -10,6 +10,7 @@ from src.diffusion_utils import low_nl_max_out_beta_schedule, low_and_high_nl_fo
 from src.diffusion_utils import betas_from_sqrtOneMinusAlphasCumprod
 from src.model import Unet
 from src.model_acdm_arch import UnetACDM
+from src.model_1d import Unet1D
 
 ### DIFFUSION MODEL WITH CONDITIONING
 class DiffusionModel(nn.Module):
@@ -45,7 +46,8 @@ class DiffusionModel(nn.Module):
             betas = cubic_beta_schedule(timesteps=self.timesteps)
         elif diffSchedule == "psd":
             betas = psd_beta_schedule(timesteps=self.timesteps)
-
+        elif diffSchedule == "transonicIteration7":
+            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.cat((torch.logspace(-1.2, -1, 14), torch.logspace(-0.16, -0.00005, 6))))
         elif diffSchedule == "Low-Noise-Levels-Focus":
             betas = betas_from_sqrtOneMinusAlphasCumprod(torch.tensor([0.0316, 0.0350, 0.0380, 0.0407, 0.0432, 0.0455, 0.0477, 0.0498, 0.0519,
                                                                         0.0538, 0.0558, 0.0576, 0.0595, 0.0614, 0.0632, 0.0650, 0.0669, 0.0688,
@@ -87,110 +89,6 @@ class DiffusionModel(nn.Module):
                                                                 0.7551, 0.7663, 0.7778, 0.7894, 0.8014, 0.8136, 0.8261, 0.8389, 0.8519,
                                                                 0.8653, 0.8789, 0.8929, 0.9071, 0.9218, 0.9367, 0.9520, 0.9676, 0.9836,
                                                                 0.9997], dtype=torch.float64))
-            
-        elif diffSchedule == "second_iter":
-            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.tensor([0.01259869709610939,
-        0.01259869709610939,
-        0.012601062655448914,
-        0.012605791911482811,
-        0.012608155608177185,
-        0.012612882070243359,
-        0.012617606669664383,
-        0.012619968503713608,
-        0.012624691240489483,
-        0.012627051211893559,
-        0.01263177115470171,
-        0.01263413019478321,
-        0.012638846412301064,
-        0.012643561698496342,
-        0.012645918875932693,
-        0.012645918875932693,
-        0.012650631368160248,
-        0.01265298668295145,
-        0.01265769638121128,
-        0.012662405148148537,
-        0.01266475860029459,
-        0.012669463641941547,
-        0.012671815231442451,
-        0.01267651841044426,
-        0.012678869068622589,
-        0.012683569453656673,
-        0.012688267976045609,
-        0.012690616771578789,
-        0.0126953125,
-        0.0126953125,
-        0.012697659432888031,
-        0.012702353298664093,
-        0.012707044370472431,
-        0.012709389440715313,
-        0.012714078649878502,
-        0.012716422788798809,
-        0.012721109203994274,
-        0.01272579375654459,
-        0.012728135101497173,
-        0.012732816860079765,
-        0.012735157273709774,
-        0.012739837169647217,
-        0.012742175720632076,
-        0.012746852822601795,
-        0.012751528061926365,
-        0.012753864750266075,
-        0.012753864750266075,
-        0.012758538126945496,
-        0.012760872952640057,
-        0.012765543535351753,
-        0.012770211324095726,
-        0.012772545218467712,
-        0.012777211144566536,
-        0.012779543176293373,
-        0.012784206308424473,
-        0.012786537408828735,
-        0.012791197746992111,
-        0.012795857153832912,
-        0.012798186391592026,
-        0.012802842073142529,
-        0.012805170379579067,
-        0.01280982419848442,
-        0.012814476154744625,
-        0.01281680166721344,
-        0.01282145082950592,
-        0.01282145082950592,
-        0.01282377541065216,
-        0.012828422710299492,
-        0.012830745428800583,
-        0.01283538993448019,
-        0.012840032577514648,
-        0.01284235343337059,
-        0.0128469942137599,
-        0.012849314138293266,
-        0.012853952124714851,
-        0.012858588248491287,
-        0.01286090537905693,
-        0.012865539640188217,
-        0.012867855839431286,
-        0.012872486375272274,
-        0.012874801643192768,
-        0.012879430316388607,
-        0.012884057126939297,
-        0.012884057126939297,
-        0.016820916905999184,
-        0.016820916905999184,
-        0.02705448307096958,
-        0.04373593628406525,
-        0.07084622979164124,
-        0.11484682559967041,
-        0.1862279325723648,
-        0.3020063042640686,
-        0.4897845983505249,
-        0.7943300008773804,
-        0.7943300008773804,
-        0.8413479328155518,
-        0.8911492228507996,
-        0.9438982605934143,
-        0.9718340635299683,
-        0.9997697472572327]))
-
-        
         elif diffSchedule == "Log-2-Min":
             betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-2, -1.8, 85),
                             torch.logspace(-1.8, -0.1, 10),
@@ -199,6 +97,21 @@ class DiffusionModel(nn.Module):
         elif diffSchedule == "Log-2-Min+":
             betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-2, -1.99, 85),
                             torch.logspace(-1.99, -0.1, 10),
+                            torch.logspace(-0.1, -0.0001, 5))))
+            self.timesteps=100
+        elif diffSchedule == "Log-2-Min+Closeto1":
+            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-2, -1.99, 85),
+                            torch.logspace(-1.99, -0.1, 10),
+                            torch.logspace(-0.1, -0.000001, 5))))
+            self.timesteps=100
+        elif diffSchedule == "Log-1.5-Min+":
+            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1.5, -1.49, 85),
+                            torch.logspace(-1.49, -0.1, 10),
+                            torch.logspace(-0.1, -0.0001, 5))))
+            self.timesteps=100
+        elif diffSchedule == "Log-1-Min+":
+            betas = betas_from_sqrtOneMinusAlphasCumprod(torch.concatenate((torch.logspace(-1, -0.99, 85),
+                            torch.logspace(-0.99, -0.1, 10),
                             torch.logspace(-0.1, -0.0001, 5))))
             self.timesteps=100
         elif diffSchedule == "initial_exploration":
@@ -226,7 +139,7 @@ class DiffusionModel(nn.Module):
                 use_convnext=True,
                 convnext_mult=1)
         
-        elif self.architecture == "ours":
+        elif self.architecture == "Unet2D":
             self.unet = Unet(
             dim=dataSize[0],
             sigmas=torch.zeros(1),
@@ -236,12 +149,26 @@ class DiffusionModel(nn.Module):
             convnext_mult=1,
             padding_mode=padding_mode
             )
+
+        elif self.architecture == "Unet1D":
+            self.unet = Unet1D(
+            dim=dataSize[0],
+            sigmas=torch.zeros(1),
+            channels=condChannels+dataChannels,
+            dim_mults=(1,1,1),
+            convnext_mult=1,
+            padding_mode=padding_mode
+            )
         
         else : raise Exception
 
         self.compute_schedule_variables(betas)
 
-    def compute_schedule_variables(self, betas):
+    def compute_schedule_variables(self, betas=None, sigmas = None):
+        if betas is None and sigmas is None:
+            raise Exception
+        elif sigmas is not None:
+            betas = betas_from_sqrtOneMinusAlphasCumprod(sigmas)
         betas = betas.unsqueeze(1).unsqueeze(2).unsqueeze(3)
         alphas = 1.0 - betas
         alphasCumprod = torch.cumprod(alphas, axis=0)
@@ -273,21 +200,39 @@ class DiffusionModel(nn.Module):
         new_betas = betas_from_sqrtOneMinusAlphasCumprod(new_noise_levels)
         self.compute_schedule_variables(new_betas)
 
-    # input shape (both inputs): B S C W H (D) -> output shape (both outputs): B S nC W H (D)
     def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False, 
-                return_denoiser_inputs:bool = False, input_type:str = "ancestor", 
+                input_type:str = "ancestor", 
                 fixed_timestep:int = None) -> torch.Tensor:
 
         device = "cuda" if conditioning.is_cuda else "cpu"
+        
+        # Determine dimensions based on input rank (3D tensor = 1D spatial, 4D tensor = 2D spatial)
+        # Assuming input is (Batch, Channel, Spatial...)
+        is_1d = (conditioning.ndim == 3) or (self.dimension == 1)
+        
+        # Define broadcasting shape for scalar multiplication
+        # 1D: (B, C, L) -> scalars need shape (B, 1, 1)
+        # 2D: (B, C, H, W) -> scalars need shape (B, 1, 1, 1)
+        view_shape = (-1, 1, 1) if is_1d else (-1, 1, 1, 1)
 
         if data is None:
-            N, C_cond, H, W = conditioning.shape
-            data = torch.zeros((N, self.dataChannels, H, W)).to(device)
+            if is_1d:
+                N, C_cond, L = conditioning.shape
+                data = torch.zeros((N, self.dataChannels, L)).to(device)
+            else:
+                N, C_cond, H, W = conditioning.shape
+                data = torch.zeros((N, self.dataChannels, H, W)).to(device)
+
         if self.dimension == 3:
             raise NotImplementedError()
+            
         # combine batch and sequence dimension for decoder processing
         d = data
         cond = conditioning
+
+        # Helper to reshape schedule params for broadcasting
+        def extract(a, t):
+            return a[t].view(view_shape)
 
         # TRAINING
         if self.training:
@@ -301,17 +246,21 @@ class DiffusionModel(nn.Module):
                 upper_limit_timesteps = fixed_timestep + 1
 
             t = torch.randint(lower_limit_timesteps, upper_limit_timesteps, (d.shape[0],), device=device).long()
+            
+            # Pre-fetch schedule values with correct shape
+            sqrt_alphas = extract(self.sqrtAlphasCumprod, t)
+            sqrt_one_minus_alphas = extract(self.sqrtOneMinusAlphasCumprod, t)
 
             if "input-own-pred" in input_type:
                 # forward diffusion process that adds noise to data
                 if self.diffCondIntegration == "noisy":
                     d = torch.concat((cond, d), dim=1)
                     noise = torch.randn_like(d, device=device)
-                    dNoisy = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * noise
+                    dNoisy = sqrt_alphas * d + sqrt_one_minus_alphas * noise
 
                 elif self.diffCondIntegration == "clean":
                     dNoise = torch.randn_like(d, device=device)
-                    dNoisy = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
+                    dNoisy = sqrt_alphas * d + sqrt_one_minus_alphas * dNoise
 
                     noise = torch.concat((cond, dNoise), dim=1)
                     dNoisy = torch.concat((cond, dNoisy), dim=1)
@@ -319,21 +268,23 @@ class DiffusionModel(nn.Module):
                 predictedNoiseCond = self.unet(dNoisy, t)
                 predictedNoise = predictedNoiseCond[:, cond.shape[1]:]
 
-                first_estimate = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoise)/self.sqrtAlphasCumprod[t]
+                first_estimate = (dNoisy[:, cond.shape[1]:]  - sqrt_one_minus_alphas * predictedNoise)/sqrt_alphas
                 d = first_estimate
             
             elif "input-prev-pred" in input_type:
                 # forward diffusion process that adds noise to data
                 t_prev = t+1
+                sqrt_alphas_prev = extract(self.sqrtAlphasCumprod, t_prev)
+                sqrt_one_minus_alphas_prev = extract(self.sqrtOneMinusAlphasCumprod, t_prev)
 
                 if self.diffCondIntegration == "noisy":
                     d = torch.concat((cond, d), dim=1)
                     noise = torch.randn_like(d, device=device)
-                    dNoisy = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * noise
+                    dNoisy = sqrt_alphas_prev * d + sqrt_one_minus_alphas_prev * noise
 
                 elif self.diffCondIntegration == "clean":
                     dNoise = torch.randn_like(d, device=device)
-                    dNoisy = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
+                    dNoisy = sqrt_alphas_prev * d + sqrt_one_minus_alphas_prev * dNoise
 
                     noise = torch.concat((cond, dNoise), dim=1)
                     dNoisy = torch.concat((cond, dNoisy), dim=1)
@@ -341,18 +292,18 @@ class DiffusionModel(nn.Module):
                 predictedNoiseCond = self.unet(dNoisy, t_prev)
                 predictedNoise = predictedNoiseCond[:, cond.shape[1]:]
 
-                first_estimate = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t_prev] * predictedNoise)/self.sqrtAlphasCumprod[t_prev]
+                first_estimate = (dNoisy[:, cond.shape[1]:]  - sqrt_one_minus_alphas_prev * predictedNoise)/sqrt_alphas_prev
                 d = first_estimate
 
             # forward diffusion process that adds noise to data
             if self.diffCondIntegration == "noisy":
                 d = torch.concat((cond, d), dim=1)
                 noise = torch.randn_like(d, device=device)
-                dNoisy = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * noise
+                dNoisy = sqrt_alphas * d + sqrt_one_minus_alphas * noise
 
             elif self.diffCondIntegration == "clean":
                 dNoise = torch.randn_like(d, device=device)
-                dNoisy = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
+                dNoisy = sqrt_alphas * d + sqrt_one_minus_alphas * dNoise
 
                 noise = torch.concat((cond, dNoise), dim=1)
                 dNoisy = torch.concat((cond, dNoisy), dim=1)
@@ -360,17 +311,17 @@ class DiffusionModel(nn.Module):
             else:
                 raise ValueError("Unknown conditioning integration mode")
 
-
             # noise prediction with network
             predictedNoise = self.unet(dNoisy, t)[:, cond.shape[1]:]
             noise = noise[:, cond.shape[1]:]
             # unstack batch and sequence dimension again
 
             weights = self.weights[t]
-            scale_factor = torch.sqrt(weights).view(-1, 1, 1, 1)
+            # Use dynamic view shape here
+            scale_factor = torch.sqrt(weights).view(view_shape)
 
             if return_x0_estimate:
-                x0_estimate = (dNoisy[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoise)/self.sqrtAlphasCumprod[t]
+                x0_estimate = (dNoisy[:, cond.shape[1]:]  - sqrt_one_minus_alphas * predictedNoise)/sqrt_alphas
                 return x0_estimate
                         
             return scale_factor*noise, scale_factor*predictedNoise
@@ -378,14 +329,21 @@ class DiffusionModel(nn.Module):
 
         # INFERENCE
         else:
-
             # conditioned reverse diffusion process
             if self.inferenceInitialSampling == "random":
                 dNoise = torch.randn_like(d, device=device)
                 cNoise = torch.randn_like(cond, device=device)
             else:
-                dNoise = torch.randn((1, d.shape[1], d.shape[2], d.shape[3]), device=device).expand(d.shape[0],-1,-1,-1)
-                cNoise = torch.randn((1, cond.shape[1], cond.shape[2], cond.shape[3]), device=device).expand(cond.shape[0],-1,-1,-1)
+                # Dynamic shape generation based on input dimensions
+                # Create a shape tuple: (1, C, L) or (1, C, H, W)
+                shape_d = (1,) + d.shape[1:]
+                shape_c = (1,) + cond.shape[1:]
+                
+                # Expand dims: -1 for every dimension except batch
+                expand_dims = [-1] * (d.ndim - 1)
+                
+                dNoise = torch.randn(shape_d, device=device).expand(d.shape[0], *expand_dims)
+                cNoise = torch.randn(shape_c, device=device).expand(cond.shape[0], *expand_dims)
 
             sampleStride = 1
 
@@ -394,43 +352,53 @@ class DiffusionModel(nn.Module):
 
             for i in reversed(range(0, self.timesteps, sampleStride)):
                 t = i * torch.ones(cond.shape[0], device=device).long()
+                
+                # Fetch schedule params
+                sqrt_alphas = extract(self.sqrtAlphasCumprod, t)
+                sqrt_one_minus_alphas = extract(self.sqrtOneMinusAlphasCumprod, t)
+                sqrt_recip_alphas = extract(self.sqrtRecipAlphas, t)
+                betas = extract(self.betas, t)
+                sqrt_posterior_var = extract(self.sqrtPosteriorVariance, t)
 
                 # compute conditioned part with normal forward diffusion
                 if self.inferenceConditioningIntegration == "noisy":
-                    condNoisy = self.sqrtAlphasCumprod[t] * cond + self.sqrtOneMinusAlphasCumprod[t] * cNoise
+                    condNoisy = sqrt_alphas * cond + sqrt_one_minus_alphas * cNoise
                 else:
                     condNoisy = cond
 
                 if input_type == "clean":
                     dNoise = torch.randn_like(d, device=device)
-                    dNoise = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
+                    dNoise = sqrt_alphas * d + sqrt_one_minus_alphas * dNoise
 
                 elif input_type == "prev-pred":
 
                     t_prev= torch.minimum(t + 1, torch.tensor(self.timesteps-1))
+                    sqrt_alphas_prev = extract(self.sqrtAlphasCumprod, t_prev)
+                    sqrt_one_minus_alphas_prev = extract(self.sqrtOneMinusAlphasCumprod, t_prev)
 
                     dNoise = torch.randn_like(d, device=device)
-                    dNoise = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
+                    dNoise = sqrt_alphas_prev * d + sqrt_one_minus_alphas_prev * dNoise
                     
                     dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
                     predictedNoiseCond = self.unet(dNoiseCond, t_prev)
-                    x0_estimate = (dNoiseCond[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t_prev] * predictedNoiseCond[:, cond.shape[1]:])/self.sqrtAlphasCumprod[t_prev]
+                    x0_estimate = (dNoiseCond[:, cond.shape[1]:]  - sqrt_one_minus_alphas_prev * predictedNoiseCond[:, cond.shape[1]:])/sqrt_alphas_prev
 
                     dNoise = torch.randn_like(d, device=device)
-                    dNoise = self.sqrtAlphasCumprod[t] * x0_estimate + self.sqrtOneMinusAlphasCumprod[t] * dNoise  
+                    dNoise = sqrt_alphas * x0_estimate + sqrt_one_minus_alphas * dNoise  
                 
                 elif input_type == "own-pred":                
                     t_prev = t
+                    # (Note: Reuse previously fetched scalars for t)
 
                     dNoise = torch.randn_like(d, device=device)
-                    dNoise = self.sqrtAlphasCumprod[t_prev] * d + self.sqrtOneMinusAlphasCumprod[t_prev] * dNoise
+                    dNoise = sqrt_alphas * d + sqrt_one_minus_alphas * dNoise
                 
                     dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
                     predictedNoiseCond = self.unet(dNoiseCond, t_prev)
-                    x0_estimate = (dNoiseCond[:, cond.shape[1]:]  - self.sqrtOneMinusAlphasCumprod[t_prev] * predictedNoiseCond[:, cond.shape[1]:])/self.sqrtAlphasCumprod[t_prev]
+                    x0_estimate = (dNoiseCond[:, cond.shape[1]:]  - sqrt_one_minus_alphas * predictedNoiseCond[:, cond.shape[1]:])/sqrt_alphas
                     
                     dNoise = torch.randn_like(d, device=device)
-                    dNoise = self.sqrtAlphasCumprod[t] * x0_estimate + self.sqrtOneMinusAlphasCumprod[t] * dNoise
+                    dNoise = sqrt_alphas * x0_estimate + sqrt_one_minus_alphas * dNoise
                     
                 dNoiseCond = torch.concat((condNoisy, dNoise), dim=1)
 
@@ -438,20 +406,23 @@ class DiffusionModel(nn.Module):
                 predictedNoiseCond = self.unet(dNoiseCond, t)
 
                 # use model (noise predictor) to predict mean
-                modelMean = self.sqrtRecipAlphas[t] * (dNoiseCond - self.betas[t] * predictedNoiseCond / self.sqrtOneMinusAlphasCumprod[t])
+                modelMean = sqrt_recip_alphas * (dNoiseCond - betas * predictedNoiseCond / sqrt_one_minus_alphas)
 
                 dNoise = modelMean[:, cond.shape[1]:modelMean.shape[1]] # discard prediction of conditioning
                 if i != 0 and self.inferenceSamplingMode == "ddpm":
                     if self.inferencePosteriorSampling == "random":
                         # sample randomly (only for non-final prediction)
-                        dNoise = dNoise + self.sqrtPosteriorVariance[t] * torch.randn_like(dNoise)
+                        dNoise = dNoise + sqrt_posterior_var * torch.randn_like(dNoise)
                     else:
                         # sample with same seed (only for non-final prediction)
-                        postNoise = torch.randn((1, dNoise.shape[1], dNoise.shape[2], dNoise.shape[3]), device=device).expand(dNoise.shape[0],-1,-1,-1)
-                        dNoise = dNoise + self.sqrtPosteriorVariance[t] * postNoise
+                        shape_dNoise = (1,) + dNoise.shape[1:]
+                        expand_dims = [-1] * (dNoise.ndim - 1)
+                        
+                        postNoise = torch.randn(shape_dNoise, device=device).expand(dNoise.shape[0], *expand_dims)
+                        dNoise = dNoise + sqrt_posterior_var * postNoise
 
                 if return_x0_estimate:
-                    x0_estimate = (dNoiseCond[:, cond.shape[1]:modelMean.shape[1]]  - self.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, cond.shape[1]:modelMean.shape[1]])/self.sqrtAlphasCumprod[t]
+                    x0_estimate = (dNoiseCond[:, cond.shape[1]:modelMean.shape[1]]  - sqrt_one_minus_alphas * predictedNoiseCond[:, cond.shape[1]:modelMean.shape[1]])/sqrt_alphas
                     all_x0_estimates.append(x0_estimate)
 
             if return_x0_estimate:

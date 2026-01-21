@@ -2,52 +2,97 @@ import torch
 import torch.optim as optim
 import wandb
 import os
-from src.utils import evaluate_trajectory_vorticity, evaluate_trajectory_mse
+from src.utils import evaluate_trajectory
 from src.diffusion_utils import compute_estimate, betas_from_sqrtOneMinusAlphasCumprod
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, CosineAnnealingWarmRestarts
 import json
 import collections
+from torch.nn import functional as F
+
+import os
+import torch
 
 def traj_eval_step(traj_loader, epoch, epoch_sampling_frequency, model, device, all_configs, log_dict, checkpoint_dir):
-
-    # --- Trajectory Evaluation  and Logging ---
+    """
+    Evaluates trajectory metrics using the unified evaluate_trajectory function
+    and handles logging and best-model saving.
+    """
+    # Check if we should evaluate this epoch
     if traj_loader and epoch % epoch_sampling_frequency == 0 and epoch > 0:
         model.eval()
         print("Evaluating on trajectories...")
 
-        if all_configs["loss_params"]["eval_traj_metric"] == "vorticity_corr":
-            traj_metrics = evaluate_trajectory_vorticity(model, traj_loader, device)
-            current_traj_time = traj_metrics['time_under_threshold']
-            
-            # Log the current trajectory metrics
-            log_dict['time_under_0.8'] = current_traj_time
-            for t, corr in enumerate(traj_metrics['mean_correlations']):
-                log_dict[f'vorticity_correlation_t_{t+1}'] = corr
-            print(f"🌀 Vorticity correlation time under 0.8: {current_traj_time}")
+        # 1. Retrieve configuration
+        metrics_list = all_configs["loss_params"]["eval_traj_metrics"]
+        primary_metric = all_configs["loss_params"]["primary_metric"]
 
-            if current_traj_time > log_dict['best_traj_time']:
+        # 2. Run the unified evaluation (computes all requested metrics in one pass)
+        results = evaluate_trajectory(model, traj_loader, device, metrics=metrics_list)
+
+        # 3. Log detailed per-timestep metrics
+        # Map result keys to the log_dict keys you expect
+        if 'vort_corr' in metrics_list:
+            for t, val in enumerate(results['vort_corr_per_ts']):
+                log_dict[f'vorticity_correlation_t_{t+1}'] = val
+        
+        if 'mse' in metrics_list:
+            for t, val in enumerate(results['mse_per_ts']):
+                log_dict[f'mse_t_{t+1}'] = val
+        
+        if 'corr' in metrics_list:
+            for t, val in enumerate(results['corr_per_ts']):
+                log_dict[f'correlation_t_{t+1}'] = val
+
+        # 4. Handle Best Model Selection
+        if primary_metric == "vort_corr" and 'vort_corr' in metrics_list:
+            # Metric: Time until correlation drops below threshold
+            current_traj_time = results['vort_corr_time_under_threshold']
+            log_dict['time_under_0.8'] = current_traj_time
+            print(f"Vorticity correlation time under 0.8: {current_traj_time}")
+
+            # Check for improvement (Higher time is better)
+            if current_traj_time > log_dict.get('best_traj_time', -1):
                 best_traj_time = current_traj_time
+                log_dict['best_traj_time'] = best_traj_time
+                
                 best_checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pth')
                 torch.save(model.state_dict(), best_checkpoint_path)
                 print(f"✅ New best model saved to {best_checkpoint_path} with trajectory time: {best_traj_time}")
 
+        elif primary_metric == "corr" and 'corr' in metrics_list:
+            # Metric: Time until correlation drops below threshold
+            current_traj_time = results['corr_time_under_threshold']
+            log_dict['time_under_0.8'] = current_traj_time
+            print(f"Correlation time under 0.8: {current_traj_time}")
+
+            # Check for improvement (Higher time is better)
+            if current_traj_time > log_dict.get('best_traj_time', -1):
+                best_traj_time = current_traj_time
                 log_dict['best_traj_time'] = best_traj_time
-
-        elif all_configs["loss_params"]["eval_traj_metric"] == "mse":
-            traj_metrics = evaluate_trajectory_mse(model, traj_loader, device)
-            current_traj_error = traj_metrics['mean_error']
-
-            for t, mse in enumerate(traj_metrics['errors_per_ts']):
-                log_dict[f'mse_t_{t+1}'] = mse
-
-            if current_traj_error < log_dict['best_traj_error']:
-                best_traj_error = current_traj_error
+                
                 best_checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pth')
                 torch.save(model.state_dict(), best_checkpoint_path)
-                print(f"✅ New best model saved to {best_checkpoint_path} with trajectory error: {best_traj_error}")
+                print(f"✅ New best model saved to {best_checkpoint_path} with trajectory time: {best_traj_time}")
 
+        elif primary_metric == "mse" and 'mse' in metrics_list:
+            # Metric: Mean MSE over trajectory
+            current_traj_error = results['mean_mse']
+            print(f"📉 Mean Trajectory MSE: {current_traj_error:.2e}")
+
+            # Initialize best_traj_error if missing
+            if log_dict.get('best_traj_error') is None:
+                log_dict['best_traj_error'] = float('inf')
+
+            # Check for improvement (Lower MSE is better)
+            if current_traj_error < log_dict['best_traj_error']:
+                best_traj_error = current_traj_error
                 log_dict['best_traj_error'] = best_traj_error
+                
+                best_checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pth')
+                torch.save(model.state_dict(), best_checkpoint_path)
+                print(f"✅ New best model saved to {best_checkpoint_path} with trajectory error: {best_traj_error:.2e}")
 
+        # 5. Routine Checkpoint Saving
         checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}.pth")
         torch.save(model.state_dict(), checkpoint_path)
         print(f"💾 Checkpoint saved for epoch {epoch+1} at {checkpoint_path}")
@@ -88,9 +133,9 @@ def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_pa
     best_traj_time = 0
 
     for epoch in range(num_epochs):
-        if epoch >= 100:
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = 0.00001
+       # if epoch >= 100:
+        #    for param_group in optimizer.param_groups:
+         #       param_group['lr'] = 0.00001
 
         # --- Training Loop ---
         model.train()
@@ -168,7 +213,10 @@ def train_diffusion_model_multisteps(model, train_loader, val_loader, traj_loade
     best_val_loss = float('inf')
     best_traj_time = 0
     best_traj_error = 100000000
-    optimizer = optim.Adam(model.parameters(), lr=train_params["learning_rate"])
+    lr_start = train_params["learning_rate_start"]
+    #lr_end = train_params["learning_rate_end"]
+
+    optimizer = optim.Adam(model.parameters(), lr=lr_start)
     device = torch.device(train_params["device"])
     model.to(device)
     n_proxy_steps = train_params["n_proxy_steps"]
@@ -211,7 +259,6 @@ def train_diffusion_model_multisteps(model, train_loader, val_loader, traj_loade
             loss.backward()
             optimizer.step()
         avg_train_loss = running_train_loss / (batch_idx + 1)
-        print(avg_train_loss)
         
         if val_loader is None:
             avg_val_loss = 0.0

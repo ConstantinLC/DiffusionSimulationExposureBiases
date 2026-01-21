@@ -10,6 +10,7 @@ from src.model_diffusion import DiffusionModel
 from src.trainer import train_diffusion_model, train_diffusion_model_multisteps
 from src.utils import count_parameters
 from src.utils import get_next_run_number
+from torch.nn import functional as F
 
 def main():
     parser = argparse.ArgumentParser(description="Train a diffusion model.")
@@ -23,9 +24,10 @@ def main():
     print(f"Loaded config from: {args.config}")
     
     # --- Setup checkpoint directory ---
-    base_checkpoint_dir = './checkpoints'
-    run_number = get_next_run_number(base_checkpoint_dir)
-    checkpoint_dir = os.path.join(base_checkpoint_dir, f'run_{run_number}')
+    base_checkpoint_dir = config["data_params"]["base_checkpoint_dir"]
+    dataset_checkpoint_dir = os.path.join(base_checkpoint_dir, config["data_params"]["dataset_name"])
+    run_number = get_next_run_number(dataset_checkpoint_dir)
+    checkpoint_dir = os.path.join(dataset_checkpoint_dir, f'run_{run_number}')
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Artifacts for this run will be saved in: {checkpoint_dir}")
 
@@ -55,18 +57,27 @@ def main():
         model.unet.load_state_dict(checkpoint)
         print(f"Checkpoint loaded from {config['checkpoint']}")
 
+    if 'noise_levels_json' in config and config['noise_levels_json'] != "":
+        with open(config['noise_levels_json']) as f:
+            file = json.load(f)
+            model.compute_schedule_variables(sigmas = torch.tensor(file['noise_levels']))
+        
+        print(f"Noise Levels loaded from {config['checkpoint']}")
+
     print(f"Model has {count_parameters(model)} parameters.")
 
     # Initialize loss function
     if config['loss_params']['name'] == 'mse':
         print("Using MSELoss")
         criterion = nn.MSELoss()
+    elif config['loss_params']['name'] == 'l1':
+        print("Using L1-Loss")
+        criterion = F.smooth_l1_loss
     else:
         raise ValueError(f"Unknown loss function name: {config['loss_params']['name']}")
     
     # Start training
     if config['data_params']['sequence_length'][0] == 2:
-        print('a')
         trained_model = train_diffusion_model(
             model, 
             train_loader, 

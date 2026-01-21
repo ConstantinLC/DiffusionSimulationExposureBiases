@@ -61,7 +61,7 @@ def evaluate_trajectory_vorticity(predictions, ground_truth, threshold=0.8):
 # 3. Model Evaluation Logic
 # ==========================================
 
-def evaluate_rollout(models, m_eval, traj_loader, device, rollout_steps=30):
+def evaluate_rollout_with_evaluator(models, m_eval, traj_loader, device, rollout_steps=30):
     """
     Runs autoregressive rollout for multiple models over the FULL dataset.
     """
@@ -170,6 +170,85 @@ def evaluate_rollout(models, m_eval, traj_loader, device, rollout_steps=30):
         "data": final_ground_truth          # (N_total, T_total, C, H, W)
     }
 
+
+def evaluate_rollout_alone(models, traj_loader, device, rollout_steps=30):
+    """
+    Runs autoregressive rollout for multiple models over the FULL dataset.
+    """
+    # 1. Set models to eval mode
+    for model in list(models.values()):
+        model.eval()
+
+    # 2. Initialize accumulators
+    # We will store predictions on CPU to avoid GPU OOM
+    all_predictions = {name: [] for name in models} 
+    all_ground_truth = []
+    
+    # We will track the running sum of distances to average them later
+    # Shape: (rollout_steps, )
+    running_eval_distances = {name: torch.zeros(rollout_steps, device=device) for name in models}
+    total_samples = 0
+
+    print(f"Starting evaluation over full dataset ({len(traj_loader)} batches)...")
+
+    with torch.no_grad():
+        for batch_idx, sample in enumerate(traj_loader):
+            
+            # --- A. Prepare Batch ---
+            data = sample["data"].to(device) # (B, T_total, C, H, W)
+            batch_size = data.shape[0]
+            total_samples += batch_size
+            
+            # Store Ground Truth (CPU)
+            all_ground_truth.append(data.cpu())
+
+            # Initial Condition (t=0)
+            conditioning_frame = data[:, 0]
+            
+            # Current state buffer for this batch
+            current_preds = {name: run_model(model, conditioning_frame) for name, model in models.items()}
+            
+            # Batch trajectory buffer: List of T tensors, each (B, C, H, W)
+            batch_trajectory_buffer = {name: [] for name in models}
+
+            # --- B. Process Step 0 (Initial Prediction) ---
+            # We calculate this outside the loop to handle the "0-th" step logic cleanly            
+            for name in models:
+                # Store prediction
+                batch_trajectory_buffer[name].append(current_preds[name])
+            for t in range(1, rollout_steps):
+                for name, model in models.items():
+                    current_preds[name] = run_model(model, current_preds[name])
+                    batch_trajectory_buffer[name].append(current_preds[name])
+
+            # --- D. Store Batch Results to CPU ---
+            for name in models:
+                # Stack time dimension: (B, T, C, H, W)
+                full_batch_traj = torch.stack(batch_trajectory_buffer[name], dim=1)
+                all_predictions[name].append(full_batch_traj.cpu())
+
+            # Optional: Print progress
+            if (batch_idx + 1) % 5 == 0:
+                print(f"Processed batch {batch_idx + 1}/{len(traj_loader)}")
+
+    # 3. Aggregate Results
+    print("Aggregating results...")
+    
+    final_predictions = {}
+    for name in models:
+        # Concatenate all batches along dimension 0
+        final_predictions[name] = torch.cat(all_predictions[name], dim=0)
+        
+    final_ground_truth = torch.cat(all_ground_truth, dim=0)
+
+    print(f"Evaluation Complete. Total samples: {total_samples}")
+    print(f"Prediction Shape: {final_predictions[list(models.keys())[0]].shape}")
+
+    return {
+        "predictions": final_predictions,   # (N_total, T, C, H, W)
+        "data": final_ground_truth          # (N_total, T_total, C, H, W)
+    }
+
 # ==========================================
 # 4. Main Script
 # ==========================================
@@ -179,19 +258,23 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate Diffusion Models on Turbulence Data")
     
     # Paths
-    parser.add_argument('--data_path', type=str, required=True, help="Path to dataset root")
-    parser.add_argument('--eval_model_path', type=str, required=True, help="Path to the pretrained Evaluator UNet (.pth)")
+    parser.add_argument('--data_path', type=str, default='/mnt/SSD2/constantin/sda/data', help="Path to dataset root")
+    parser.add_argument('--eval_model_path', type=str, default=None, help="Path to the pretrained Evaluator UNet (.pth)")
     
     # UPDATED ARGUMENT:
     parser.add_argument('--checkpoints', nargs='+', required=True, 
                         help="List of checkpoints. Format: 'Name=/path/to/ckpt.pth'. Space separated.")
+    
+    # UPDATED ARGUMENT:
+    parser.add_argument('--noise_levels', nargs='+', default=None, 
+                        help="List of noise_levels. Format: 'Name=/path/to/noise_levels.json'. Space separated.")
     
     parser.add_argument('--output_dir', type=str, default="./results", help="Directory to save plots and metrics")
     
     # Params
     parser.add_argument('--resolution', type=int, default=64)
     parser.add_argument('--batch_size', type=int, default=50) 
-    parser.add_argument('--rollout_steps', type=int, default=20)
+    parser.add_argument('--rollout_steps', type=int, default=63)
     parser.add_argument('--device', type=str, default='cuda')
     
     args = parser.parse_args()
@@ -199,6 +282,15 @@ def main():
     
     # 0. Parse Checkpoints into Dictionary
     checkpoints_dict = parse_checkpoint_args(args.checkpoints)
+    if args.noise_levels is not None:
+        noise_levels_dict = {}
+        noise_levels_adresses = parse_checkpoint_args(args.noise_levels)
+        for k in noise_levels_adresses:
+            with open(noise_levels_adresses[k]) as f:
+                d = json.load(f)
+                noise_levels_dict[k] = d["noise_levels"]
+        
+
     print(f"--- Evaluating {len(checkpoints_dict)} Models ---")
     for name, path in checkpoints_dict.items():
         print(f"  > {name}: {path}")
@@ -214,22 +306,24 @@ def main():
         "frames_per_time_step": 1,
         "limit_trajectories_train": 100,
         "limit_trajectories_val": args.batch_size, 
-        "batch_size": args.batch_size
+        "batch_size": args.batch_size,
+        "val_batch_size": args.batch_size
     }
     _, _, traj_loader = get_data_loaders(data_params)
 
     # 2. Load Evaluator Model
+    
     print(f"--- Loading Evaluator Model: {args.eval_model_path} ---")
     m_eval = Unet(
-        dim=64, channels=2, dim_mults=(1,1,1),
+        dim=64, channels=2, dim_mults=(1,1,1), 
         use_convnext=True, convnext_mult=1, with_time_emb=False
     ).to(args.device)
-    
-    checkpoint = torch.load(args.eval_model_path, map_location=args.device)
+
+    """checkpoint = torch.load(args.eval_model_path, map_location=args.device)
     if 'stateDictDecoder' in checkpoint:
         m_eval.load_state_dict(checkpoint['stateDictDecoder'])
     else:
-        m_eval.load_state_dict(checkpoint)
+        m_eval.load_state_dict(checkpoint)"""
     m_eval.eval()
 
     # 3. Load Candidate Models (Looping over Dictionary)
@@ -248,8 +342,7 @@ def main():
             inferenceSamplingMode="ddpm",
             inferenceConditioningIntegration="clean",
             diffCondIntegration="clean",
-            inferenceInitialSampling="random",
-            x0_estimate_type="mean"
+            inferenceInitialSampling="random"
         ).to(args.device)
         
         # Load weights
@@ -258,12 +351,16 @@ def main():
             model.load_state_dict(ckpt['state_dict'])
         else:
             model.load_state_dict(ckpt)
+
+        if args.noise_levels is not None:
+            print(noise_levels_dict[name])
+            model.compute_schedule_variables(sigmas=torch.tensor(noise_levels_dict[name]))
             
         models[name] = model
 
     # 4. Run Evaluation
     print("--- Running Rollouts ---")
-    results = evaluate_rollout(models, m_eval, traj_loader, args.device, args.rollout_steps)
+    results = evaluate_rollout_with_evaluator(models, m_eval, traj_loader, args.device, args.rollout_steps)
     
     # 5. Compute Metrics & Plotting
     print("--- Computing Metrics ---")
@@ -311,6 +408,7 @@ def main():
             "Step 10 MSE": float(mse_time[10]),
             "Last step MSE": float(mse_time[-1])
         }
+        #"final evaluator distance": float(eval_dist_time[-1]),
 
     # Finalize Plots
     ax_mse.set_yscale('log')
