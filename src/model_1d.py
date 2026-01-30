@@ -189,7 +189,7 @@ class Unet1D(nn.Module):
     def __init__(
         self,
         dim,
-        sigmas,
+        sigmas=torch.tensor([1]),
         init_dim=None,
         out_dim=None,
         dim_mults=(1, 2, 4, 8),
@@ -207,7 +207,8 @@ class Unet1D(nn.Module):
         # determine dimensions
         self.channels = channels
         # Move sigmas to register_buffer generally preferred, but keeping user style
-        self.sigmas = torch.ravel(sigmas).to('cuda')
+        self.sigmas = sigmas.to('cuda')
+        #self.register_buffer("sigmas", sigmas)
 
         init_dim = init_dim if init_dim is not None else dim // 3 * 2
         
@@ -282,7 +283,6 @@ class Unet1D(nn.Module):
     def forward(self, x, time):
         x = self.init_conv(x)
 
-        # Assuming time is an index tensor for sigmas
         noise_levels = torch.log(self.sigmas[time])
 
         t = self.time_mlp(noise_levels) if self.time_mlp is not None else None

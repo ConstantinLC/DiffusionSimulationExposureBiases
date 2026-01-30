@@ -2,6 +2,15 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
+# OBTAINED FROM 
+#
+# @inproceedings{shehata2025improved,
+#   title={Improved Sampling Of Diffusion Models In Fluid Dynamics With Tweedie's Formula},
+#   author={Shehata, Youssef and Holzschuh, Benjamin and Thuerey, Nils},
+#   booktitle={The Thirteenth International Conference on Learning Representations},
+#   year={2025}
+# }
+
 class DataParams(object):
     def __init__(self, batch=4, augmentations=[], sequenceLength=[1,1], randSeqOffset=False,
                 dataSize=[128,64], dimension=2, simFields=[], simParams=[], normalizeMode=""):

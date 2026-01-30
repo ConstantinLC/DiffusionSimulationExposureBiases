@@ -45,6 +45,8 @@ class KolmogorovDataset_Rozet(Dataset):
             self.n_trajectories = min(self.n_trajectories, self.limit_trajectories)
         self.n_frames = self.data.shape[1] - self.seqLength + 1  # Ignore timestep for now
 
+        print(self.__len__())
+
         
     def __len__(self) -> int:
         return self.n_trajectories * self.n_frames
@@ -375,10 +377,12 @@ class KuramotoSivashinskyDataset(Dataset):
         self.conditioned = conditioned
         
         # Parse sequence length configuration
-        self.seqLength = sequenceLength[0]  
-        self.timestep = sequenceLength[1] 
+        self.seqLength = sequenceLength[0]
+        self.timestep = sequenceLength[1]
 
-        # Construct filename: e.g., "KS_train_512.h5"
+        if self.mode == "test" or self.mode=="valid":
+            self.mode = "valid"
+
         if self.mode == "train":
             filename = f"KS_{self.mode}_512.h5"
         else:
@@ -388,7 +392,10 @@ class KuramotoSivashinskyDataset(Dataset):
         # Load Data
         with h5py.File(file_path, mode='r') as f:
             for k in f.keys():
-                self.data = torch.tensor(np.array(f[k]["pde_140-256"])).to(torch.float)
+                if self.mode == "train":
+                    self.data = torch.tensor(np.array(f[k]["pde_140-256"])).to(torch.float)
+                else:
+                    self.data = torch.tensor(np.array(f[k]["pde_640-256"])).to(torch.float)
 
         self.data = self.data[:, ::self.timestep, ::4]
 
@@ -400,6 +407,7 @@ class KuramotoSivashinskyDataset(Dataset):
 
         # Calculate number of valid start frames
         self.n_frames = self.data.shape[1] - self.seqLength + 1
+        print(self.mode, self.__len__())        
 
     def __len__(self) -> int:
         return self.n_trajectories * self.n_frames

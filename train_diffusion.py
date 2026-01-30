@@ -11,6 +11,7 @@ from src.trainer import train_diffusion_model, train_diffusion_model_multisteps
 from src.utils import count_parameters
 from src.utils import get_next_run_number
 from torch.nn import functional as F
+from src.diffusion_utils import betas_from_sqrtOneMinusAlphasCumprod
 
 def main():
     parser = argparse.ArgumentParser(description="Train a diffusion model.")
@@ -25,9 +26,8 @@ def main():
     
     # --- Setup checkpoint directory ---
     base_checkpoint_dir = config["data_params"]["base_checkpoint_dir"]
-    dataset_checkpoint_dir = os.path.join(base_checkpoint_dir, config["data_params"]["dataset_name"])
-    run_number = get_next_run_number(dataset_checkpoint_dir)
-    checkpoint_dir = os.path.join(dataset_checkpoint_dir, f'run_{run_number}')
+    run_number = get_next_run_number(base_checkpoint_dir)
+    checkpoint_dir = os.path.join(base_checkpoint_dir, f'run_{run_number}')
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Artifacts for this run will be saved in: {checkpoint_dir}")
 
@@ -51,19 +51,6 @@ def main():
     train_loader, val_loader, traj_loader = get_data_loaders(config['data_params'])
     model = DiffusionModel(**config['model_params'])
 
-    if config['checkpoint'] != "":
-        checkpoint = torch.load(config['checkpoint'])
-        checkpoint = {key[5:]:checkpoint[key] for key in checkpoint if 'unet' in key and not 'sigmas' in key}
-        model.unet.load_state_dict(checkpoint)
-        print(f"Checkpoint loaded from {config['checkpoint']}")
-
-    if 'noise_levels_json' in config and config['noise_levels_json'] != "":
-        with open(config['noise_levels_json']) as f:
-            file = json.load(f)
-            model.compute_schedule_variables(sigmas = torch.tensor(file['noise_levels']))
-        
-        print(f"Noise Levels loaded from {config['checkpoint']}")
-
     print(f"Model has {count_parameters(model)} parameters.")
 
     # Initialize loss function
@@ -75,6 +62,13 @@ def main():
         criterion = F.smooth_l1_loss
     else:
         raise ValueError(f"Unknown loss function name: {config['loss_params']['name']}")
+    
+
+    #ckpt = torch.load("/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/KuramotoSivashinsky/baselines/adaptive_20steps/finetuning_iteration0.pth")
+    #betas = ckpt['betas'].ravel()
+    #sigmas = model.sqrtOneMinusAlphasCumprod.ravel()
+    #sigmas = torch.concatenate((torch.ones(80).to('cuda')* sigmas[0], sigmas))
+    #model.compute_schedule_variables(sigmas=sigmas)
     
     # Start training
     if config['data_params']['sequence_length'][0] == 2:

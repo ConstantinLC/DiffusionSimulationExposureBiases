@@ -8,6 +8,50 @@ from src.model_diffusion import DiffusionModel
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+import torch
+
+def compute_pearson_correlation(x, y, epsilon=1e-8):
+    """
+    Computes the Pearson correlation coefficient between two tensors x and y 
+    along all dimensions except the batch dimension (dim 0).
+    
+    Args:
+        x (torch.Tensor): Input tensor 1. Shape (B, ...).
+        y (torch.Tensor): Input tensor 2. Must have the same shape as x.
+        epsilon (float): Small constant to avoid division by zero.
+
+    Returns:
+        torch.Tensor: A 1D tensor of shape (B,) containing the correlation 
+                      coefficient for each sample in the batch.
+    """
+    assert x.shape == y.shape, "Inputs must have the same shape"
+    
+    # 1. Flatten all dimensions except the batch dimension
+    # Shape changes from (B, C, H, W) or (B, L) -> (B, N_features)
+    x_flat = x.reshape(x.shape[0], -1)
+    y_flat = y.reshape(y.shape[0], -1)
+
+    # 2. Compute means along the feature dimension
+    x_mean = torch.mean(x_flat, dim=1, keepdim=True)
+    y_mean = torch.mean(y_flat, dim=1, keepdim=True)
+
+    # 3. Center the data (subtract mean)
+    x_centered = x_flat - x_mean
+    y_centered = y_flat - y_mean
+
+    # 4. Compute numerator: Covariance (unscaled)
+    numerator = torch.sum(x_centered * y_centered, dim=1)
+
+    # 5. Compute denominator: Product of standard deviations (unscaled)
+    x_var = torch.sum(x_centered ** 2, dim=1)
+    y_var = torch.sum(y_centered ** 2, dim=1)
+    denominator = torch.sqrt(x_var * y_var)
+
+    # 6. Compute correlation
+    correlation = numerator / (denominator + epsilon)
+
+    return correlation
+
 def compute_image_correlation(img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
     if img1.shape != img2.shape:
         raise ValueError(f"Input image shapes must be identical. Got {img1.shape} and {img2.shape}")
@@ -164,7 +208,7 @@ def evaluate_trajectory(model, loader, device, metrics=['mse', 'corr', 'vort_cor
 
             for t in range(1, T):
                 # 1. Autoregressive Step
-                predicted_frame = model(current_pred, None)
+                predicted_frame = run_model(model, current_pred)
                 ground_truth_frame = data[:, t]
                 
                 # 2. Compute Metrics
@@ -175,7 +219,7 @@ def evaluate_trajectory(model, loader, device, metrics=['mse', 'corr', 'vort_cor
 
                 # --- Pixel Correlation ---
                 if 'corr' in metrics:
-                    corr_val = compute_image_correlation(predicted_frame.unsqueeze(1), ground_truth_frame.unsqueeze(1))
+                    corr_val = compute_pearson_correlation(predicted_frame, ground_truth_frame)
                     batch_results['corr'].append(corr_val.cpu().numpy())
 
                 # --- Vorticity Correlation ---
@@ -185,7 +229,7 @@ def evaluate_trajectory(model, loader, device, metrics=['mse', 'corr', 'vort_cor
                     gt_vort = vorticity(ground_truth_frame)
                     
                     # Compute correlation (unsqueeze to add channel dim for helper function)
-                    v_corr_val = compute_image_correlation(pred_vort.unsqueeze(1), gt_vort.unsqueeze(1))
+                    v_corr_val = compute_pearson_correlation(pred_vort, gt_vort)
                     batch_results['vort_corr'].append(v_corr_val.cpu().numpy())
                 
                 # 3. Update State
@@ -208,7 +252,7 @@ def evaluate_trajectory(model, loader, device, metrics=['mse', 'corr', 'vort_cor
         # 1. Combine all batches: shape (Total_Batches, Time_Steps)
         # Transpose internal arrays to be (Batch, Time) before stacking
         full_data = np.concatenate([np.transpose(batch_arr) for batch_arr in history[m]], axis=0)
-        print(full_data.shape)
+        print("full_data", full_data.shape)
         # 2. Compute mean over batch dimension -> shape (Time_Steps,)
         metric_curve = np.mean(full_data, axis=0)
         output[f'{m}_per_ts'] = metric_curve
@@ -255,6 +299,8 @@ def evaluate_trajectory_vorticity(model, loader, device, threshold=0.8):
                 # Predict the next frame
                 predicted_frame = model(current_pred, None)
                 ground_truth_frame = data[:, t]
+
+                print(torch.mean((predicted_frame - ground_truth_frame)**2))
                 
                 # Calculate vorticity for both prediction and ground truth
                 pred_vort = vorticity(predicted_frame)
@@ -321,63 +367,12 @@ def evaluate_trajectory_mse(model, loader, device, threshold=0.8):
     }
 
 
-def separateFrequencies(data: torch.Tensor, cutoff_frequency: int = 8):
-    npix = data.shape[-1]
-    fft_data = torch.fft.fft2(data)
-    kfreq = torch.fft.fftfreq(npix) * npix
-    kfreq2D = torch.meshgrid(kfreq, kfreq)
-    knrm = torch.sqrt(kfreq2D[0]**2 + kfreq2D[1]**2)
-    fft_highpass = fft_data * (knrm > cutoff_frequency).unsqueeze(0).unsqueeze(0)
-    fft_lowpass = fft_data * (knrm <= cutoff_frequency).unsqueeze(0).unsqueeze(0)
-    data_highpass = torch.real(torch.fft.ifft2(fft_highpass))
-    data_lowpass = torch.real(torch.fft.ifft2(fft_lowpass))
-    return data_lowpass, data_highpass    
-
-
-import torch
-
 def make_freq_radius(H, W, device):
     fy = torch.fft.fftfreq(H, device=device)
     fx = torch.fft.fftfreq(W, device=device)
     FX, FY = torch.meshgrid(fx, fy, indexing="xy")
     return torch.sqrt(FX**2 + FY**2)  # (H, W)
 
-def lowpass_field(u, k_c):
-    """
-    Extract low-frequency component of a field.
-    u: (B, C, H, W) tensor
-    k_c: scalar or (B,) tensor of cutoffs
-    """
-    U = torch.fft.fft2(u, dim=(-2, -1))
-    H, W = u.shape[-2:]
-    r = make_freq_radius(H, W, u.device)  # (H, W)
-
-    if torch.is_tensor(k_c) and k_c.ndim == 1:
-        # (B, 1, H, W) mask
-        mask = (r.unsqueeze(0) < k_c[:, None, None, None])  
-    else:
-        mask = (r < k_c).unsqueeze(0)  # broadcast across batch
-
-    U = U * mask  # (B, C, H, W)
-    return torch.fft.ifft2(U, dim=(-2, -1)).real
-
-def highpass_field(u, k_c):
-    """
-    Extract high-frequency component of a field.
-    u: (B, C, H, W) tensor
-    k_c: scalar or (B,) tensor of cutoffs
-    """
-    U = torch.fft.fft2(u, dim=(-2, -1))
-    H, W = u.shape[-2:]
-    r = make_freq_radius(H, W, u.device)  # (H, W)
-
-    if torch.is_tensor(k_c) and k_c.ndim == 1:
-        mask = (r.unsqueeze(0) >= k_c[:, None, None, None])  
-    else:
-        mask = (r >= k_c).unsqueeze(0)
-
-    U = U * mask
-    return torch.fft.ifft2(U, dim=(-2, -1)).real
 
 def shuffle_batch_dim(x):
     idx = torch.randperm(x.size(0))

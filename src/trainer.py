@@ -133,9 +133,9 @@ def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_pa
     best_traj_time = 0
 
     for epoch in range(num_epochs):
-       # if epoch >= 100:
-        #    for param_group in optimizer.param_groups:
-         #       param_group['lr'] = 0.00001
+        if epoch >= train_params["T_max"]:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr_end
 
         # --- Training Loop ---
         model.train()
@@ -206,26 +206,41 @@ def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_pa
 
 
 def train_diffusion_model_multisteps(model, train_loader, val_loader, traj_loader, train_params, criterion, all_configs, checkpoint_dir):
-    """
-    Trains a diffusion model
-    """
-    epoch_sampling_frequency = train_params["epoch_sampling_frequency"]
-    best_val_loss = float('inf')
-    best_traj_time = 0
-    best_traj_error = 100000000
-    lr_start = train_params["learning_rate_start"]
-    #lr_end = train_params["learning_rate_end"]
 
-    optimizer = optim.Adam(model.parameters(), lr=lr_start)
+    epoch_sampling_frequency = train_params["epoch_sampling_frequency"]
     device = torch.device(train_params["device"])
+    
+    # --- Config extraction ---
+    num_epochs = train_params["num_epochs"]
+    lr_start = train_params["learning_rate_start"]
+    lr_end = train_params["learning_rate_end"]
+    
     model.to(device)
+
+    # --- 1. Optimizer & Scheduler Setup ---
+    optimizer = optim.Adam(model.parameters(), lr=lr_start)
+    
+    # T_max is the number of epochs until the LR reaches the minimum
+    scheduler = CosineAnnealingLR(
+        optimizer, 
+        T_max=train_params["T_max"], 
+        eta_min=lr_end
+    )
+
     n_proxy_steps = train_params["n_proxy_steps"]
     backgrad = train_params["backgrad"]
 
+    best_val_loss = float('inf')
+    best_traj_time = 0
+    best_traj_error = 100000000
+
     print(f"Starting Multi-steps Diffusion training on {device} for {train_params['num_epochs']} epochs...")
 
-    for epoch in range(train_params["num_epochs"]):
-        # (Training and validation loops remain unchanged)
+    for epoch in range(num_epochs):
+        if epoch >= train_params["T_max"]:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr_end
+
         model.train()
         running_train_loss = 0.0
         for batch_idx, sample in enumerate(train_loader):
@@ -247,7 +262,6 @@ def train_diffusion_model_multisteps(model, train_loader, val_loader, traj_loade
                         x0_estimate = compute_estimate(model, n_proxy_steps, conditioning_frame, target_frame)
                     else:
                         with torch.no_grad():
-                            
                             x0_estimate = compute_estimate(model, n_proxy_steps, conditioning_frame, target_frame)
 
                 if t > 0:
@@ -284,11 +298,14 @@ def train_diffusion_model_multisteps(model, train_loader, val_loader, traj_loade
                 
             avg_val_loss = running_val_loss / (batch_idx_val + 1) if (batch_idx_val + 1) > 0 else 0
 
+        current_lr = optimizer.param_groups[0]["lr"]
+        scheduler.step()
         # --- Base Logging Logic ---
         log_dict = {
             "epoch": epoch + 1,
             "training_loss": avg_train_loss,
             "validation_loss": avg_val_loss,
+            "learning_rate": current_lr,  # Log LR to visualize the cosine curve
             "best_traj_time": best_traj_time,
             "best_traj_error": best_traj_time
         }
@@ -304,49 +321,55 @@ def train_diffusion_model_multisteps(model, train_loader, val_loader, traj_loade
     return model
 
 
-def train_diffusion_model_initial_exploration(model, train_loader, val_loader, train_params, criterion, all_configs, checkpoint_dir):
+import torch
+import torch.optim as optim
+import wandb
+import os
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+def train_unet(model, train_loader, val_loader, traj_loader, train_params, criterion, all_configs, checkpoint_dir, device, is_master):
     """
-    Trains a diffusion model with Cosine Annealing and Dynamic Schedule Pruning.
-    Optimized to save a single checkpoint per epoch for multiple pruned steps.
+    Trains a U-Net model with DDP support.
     """
-    device = torch.device(train_params["device"])
+    epoch_sampling_frequency = train_params["epoch_sampling_frequency"]
+    
+    # --- Config extraction ---
     num_epochs = train_params["num_epochs"]
     lr_start = train_params["learning_rate_start"]
     lr_end = train_params["learning_rate_end"]
     
-    # Pruning threshold
-    tau = 1.05
-    
-    model.to(device)
+    # Note: Model is already moved to device in main.py before DDP wrapping
+    # But strictly ensuring input data goes to the right device is handled in the loop.
 
-    # --- Optimizer & Scheduler ---
+    # --- 1. Optimizer & Scheduler Setup ---
     optimizer = optim.Adam(model.parameters(), lr=lr_start)
-    t_max = train_params.get("T_max", num_epochs)
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, eta_min=lr_end)
+    
+    # T_max is the number of epochs until the LR reaches the minimum
+    scheduler = CosineAnnealingLR(
+        optimizer, 
+        T_max=train_params["T_max"], 
+        eta_min=lr_end
+    )
 
-    #scheduler = StepLR(optimizer, 5, gamma=0.1, last_epoch=-1)
+    if is_master:
+        print(f"Starting Training on {device} for {num_epochs} epochs...")
+        print(f"LR Schedule: Cosine Annealing from {lr_start:.1e} to {lr_end:.1e}")
 
-    print(f"Starting training on {device} for {num_epochs} epochs.")
-    print(f"Schedule: Cosine {lr_start:.1e} -> {lr_end:.1e} (Tau={tau})")
-
-    # Storage for results
-    eb_free_error = {}  # Maps alpha -> clean error
-    eb_free_checkpoints = {} # Maps alpha -> checkpoint path
-
-    initial_noise_levels = model.sqrtOneMinusAlphasCumprod.ravel()
-    cur_window = 0
-    cur_noise_levels = initial_noise_levels[20-(cur_window+1)*5:20-(cur_window)*5]
-
-    print(cur_noise_levels)
-
-    model.compute_schedule_variables(betas_from_sqrtOneMinusAlphasCumprod(cur_noise_levels))
-
-    print(model.sqrtOneMinusAlphasCumprod.ravel())
+    best_traj_error = float('inf')
+    best_traj_time = 0
 
     for epoch in range(num_epochs):
-        # ==========================
-        # 1. Training Loop
-        # ==========================
+        if epoch >= train_params["T_max"]:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr_end
+
+        # --- DDP: Set Epoch for Sampler ---
+        # Crucial for shuffling to work correctly across GPUs
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
+
+        # --- Training Loop ---
         model.train()
         running_train_loss = 0.0
         
@@ -356,118 +379,250 @@ def train_diffusion_model_initial_exploration(model, train_loader, val_loader, t
             target_frame = data[:, 1]
             
             optimizer.zero_grad()
-            noise, predicted_noise = model(conditioning_frame, target_frame)
-            loss = criterion(predicted_noise, noise)
+            pred = model(conditioning_frame, time=None)
+            loss = criterion(pred, target_frame)
             
             loss.backward()
             optimizer.step()
+            
             running_train_loss += loss.item()
         
         avg_train_loss = running_train_loss / (batch_idx + 1)
         
-        # ==========================
-        # 2. Validation & Pruning
-        # ==========================
-        avg_val_loss = 0.0
-        
-        # Lists to track what happens in THIS epoch
-        steps_to_delete = [] 
-        pruned_noise_levels = [] 
-        
-        if val_loader is not None:
-            # --- A. Standard Validation Loss ---
+        # --- Validation Loop ---
+        # Note: In DDP, each GPU calculates val loss on its subset. 
+        # We typically just log Rank 0's validation loss to save overhead.
+        if val_loader is None:
+            avg_val_loss = 0.0
+        else:
+            # If using DistributedSampler for validation, set epoch as well
+            if hasattr(val_loader.sampler, "set_epoch"):
+                val_loader.sampler.set_epoch(epoch)
+                
             running_val_loss = 0.0
             with torch.no_grad():
                 for batch_idx_val, sample_val in enumerate(val_loader):
                     data_val = sample_val["data"].to(device)
-                    if data_val.shape[1] != 2: continue
+                    if data_val.shape[1] != 2:
+                        continue
+                    conditioning_frame_val = data_val[:, 0]
+                    target_frame_val = data_val[:, 1]
                     
-                    noise, predicted_noise = model(data_val[:, 0], data_val[:, 1])
-                    loss_val = criterion(predicted_noise, noise)
+                    pred = model(conditioning_frame_val, time=None)
+                    loss_val = criterion(pred, target_frame_val)
                     running_val_loss += loss_val.item()
-            avg_val_loss = running_val_loss / (batch_idx_val + 1)
-
-            # --- B. Pruning Check (Single Batch) ---
-            check_batch = next(iter(val_loader))
-            data_check = check_batch["data"].to(device)
-            cond_check = data_check[:, 0]
-            target_check = data_check[:, 1]
             
-            with torch.no_grad():
-                current_timesteps = range(model.timesteps)
-                
-                for ts in current_timesteps:
-                    own_pred = model(cond_check, target_check, 
-                                                  fixed_timestep=ts, 
-                                                  return_x0_estimate=True,
-                                                  input_type="input-own-pred")
-                    
-                    clean_pred = model(cond_check, target_check, 
-                                                  fixed_timestep=ts, 
-                                                  return_x0_estimate=True,
-                                                  input_type="clean")
-                    
-                    clean_error = criterion(clean_pred, target_check).item()
-                    own_pred_error = criterion(own_pred, target_check).item()
-                    
-                    ratio = own_pred_error / clean_error
+            avg_val_loss = running_val_loss / (batch_idx_val + 1) if (batch_idx_val + 1) > 0 else 0
 
-                    print(model.sqrtOneMinusAlphasCumprod.ravel()[ts].item(), ratio, clean_error)
-                    
-                    if ratio < tau:
-                        nl_val = model.sqrtOneMinusAlphasCumprod.ravel()[ts].item()
-                        print(nl_val, ratio, clean_error, own_pred_error)
-                        # Store error immediately
-                        eb_free_error[nl_val] = clean_error
-                        
-                        # Queue for deletion and saving, but don't save yet
-                        steps_to_delete.append(ts)
-                        pruned_noise_levels.append(nl_val)
-
-            # --- C. Consolidated Saving & Deletion ---
-            if steps_to_delete:
-                # 1. Save ONE checkpoint for all steps pruned in this epoch
-                ckpt_name = f"pruned_epoch_{epoch}.pt"
-                ckpt_path = os.path.join(checkpoint_dir, ckpt_name)
-                torch.save(model.unet.state_dict(), ckpt_path)
-                
-                # 2. Update the dictionary to point multiple alphas to the same file
-                for nl in pruned_noise_levels:
-                    eb_free_checkpoints[nl] = ckpt_path
-
-                print(f"--> Pruning {len(steps_to_delete)} steps at Epoch {epoch+1}. Saved to {ckpt_name}")
-                print(eb_free_checkpoints)
-
-                map_path = os.path.join(checkpoint_dir, 'checkpoint_map.json')
-                with open(map_path, 'w') as f:
-                    json.dump(collections.OrderedDict(sorted(eb_free_checkpoints.items())), f, indent=4)
-                print(f"Checkpoint map saved to {map_path}")
-
-                map_path = os.path.join(checkpoint_dir, 'error_map.json')
-                with open(map_path, 'w') as f:
-                    json.dump(collections.OrderedDict(sorted(eb_free_error.items())), f, indent=4)
-                print(f"Checkpoint map saved to {map_path}")
-
-                # 3. Delete steps
-                if len(steps_to_delete) == len(model.betas.ravel()):
-                    cur_window += 1
-                    print(cur_window)
-                    cur_noise_levels = initial_noise_levels[20-(cur_window+1)*5:20-(cur_window)*5]
-                    model.compute_schedule_variables(betas_from_sqrtOneMinusAlphasCumprod(cur_noise_levels))
-                else:
-                    model.delete_steps(steps_to_delete)
-
-                #optimizer.state.clear()
-
-        # ==========================
-        # 3. Scheduler & Logging
-        # ==========================
+        # --- 2. Step Scheduler & Get Current LR ---
         current_lr = optimizer.param_groups[0]["lr"]
         scheduler.step()
 
-        print(f"Epoch [{epoch+1}/{num_epochs}] | "
-              f"Train: {avg_train_loss:.5f} | Val: {avg_val_loss:.5f} | "
-              f"LR: {current_lr:.2e} | Steps Left: {model.timesteps}")
+        # --- Logging (Master Only) ---
+        if is_master:
+            log_dict = {
+                "epoch": epoch + 1,
+                "training_loss": avg_train_loss,
+                "validation_loss": avg_val_loss,
+                "learning_rate": current_lr,
+                "best_traj_time": best_traj_time,
+                "best_traj_error": best_traj_error
+            }
+            
+            # --- Trajectory Evaluation ---
+            # We access the underlying model (.module) if it's wrapped in DDP
+            # This ensures that when traj_eval_step saves the checkpoint, 
+            # it doesn't have the "module." prefix in the state_dict keys.
+            if isinstance(model, DDP):
+                model_to_eval = model.module
+            else:
+                model_to_eval = model
 
-    print("Training complete!")
+            # Run trajectory evaluation periodically (only on master)
+            log_dict = traj_eval_step(
+                traj_loader, 
+                epoch, 
+                epoch_sampling_frequency, 
+                model_to_eval, 
+                device, 
+                all_configs, 
+                log_dict, 
+                checkpoint_dir
+            )
+
+            # Update local bests (traj_eval_step updates the log_dict)
+            if 'best_traj_time' in log_dict:
+                best_traj_time = log_dict['best_traj_time']
+            if 'best_traj_error' in log_dict:
+                best_traj_error = log_dict['best_traj_error']
+
+            wandb.log(log_dict)
+
+            print(f"Epoch [{epoch+1}/{num_epochs}] | "
+                  f"Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} | "
+                  f"LR: {current_lr:.2e}")
+
+    if is_master:
+        print("Training complete!")
+        
+    return model
+
+
+
+def train_unet_multisteps(model, train_loader, val_loader, traj_loader, train_params, criterion, all_configs, checkpoint_dir, device, is_master):
+    """
+    Trains a U-Net model using unrolled (autoregressive) training steps.
+    The model predicts the next frame, and that prediction is fed back 
+    as input for the subsequent step calculation.
+    """
+    epoch_sampling_frequency = train_params["epoch_sampling_frequency"]
+    
+    # --- Config extraction ---
+    num_epochs = train_params["num_epochs"]
+    lr_start = train_params["learning_rate_start"]
+    lr_end = train_params["learning_rate_end"]
+    
+    # --- 1. Optimizer & Scheduler Setup ---
+    optimizer = optim.Adam(model.parameters(), lr=lr_start)
+    
+    scheduler = CosineAnnealingLR(
+        optimizer, 
+        T_max=train_params["T_max"], 
+        eta_min=lr_end
+    )
+
+    if is_master:
+        print(f"Starting Multi-Step U-Net Training on {device} for {num_epochs} epochs...")
+        print(f"LR Schedule: Cosine Annealing from {lr_start:.1e} to {lr_end:.1e}")
+
+    best_traj_error = float('inf')
+    best_traj_time = 0
+
+    for epoch in range(num_epochs):
+        # Enforce minimum LR after T_max
+        if epoch >= train_params["T_max"]:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr_end
+
+        # --- DDP: Set Epoch for Sampler ---
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
+
+        # --- Training Loop ---
+        model.train()
+        running_train_loss = 0.0
+        
+        for batch_idx, sample in enumerate(train_loader):
+            data = sample["data"].to(device) # Shape: (B, T, C, H, W)
+            optimizer.zero_grad()
+            
+            # Accumulate loss over the trajectory
+            loss = torch.tensor(0.0, device=device)
+            
+            # Initial input is the first ground truth frame
+            current_input = data[:, 0]
+
+            # Iterate through time steps (0 -> 1, 1 -> 2, ...)
+            # We predict T-1 transitions
+            steps = data.shape[1] - 1
+            
+            for t in range(steps):
+                target_frame = data[:, t + 1]
+
+                # Forward pass: Predict next frame
+                # U-Net typically ignores the 'time' argument used in diffusion
+                pred = model(current_input, time=None)
+                
+                # Accumulate MSE loss
+                loss += criterion(pred, target_frame)
+                
+                # Autoregressive step: Use prediction as input for next step
+                # (Detach to prevent gradient explosion if sequence is very long, 
+                # though usually for short unrolls we keep gradients)
+                current_input = pred
+
+            # Backpropagation on the accumulated loss
+            loss.backward()
+            optimizer.step()
+            
+            running_train_loss += loss.item()
+        
+        avg_train_loss = running_train_loss / (batch_idx + 1)
+        
+        # --- Validation Loop ---
+        if val_loader is None:
+            avg_val_loss = 0.0
+        else:
+            if hasattr(val_loader.sampler, "set_epoch"):
+                val_loader.sampler.set_epoch(epoch)
+                
+            running_val_loss = 0.0
+            with torch.no_grad():
+                for batch_idx_val, sample_val in enumerate(val_loader):
+                    data_val = sample_val["data"].to(device)
+                    if data_val.shape[1] < 2:
+                        continue
+                        
+                    loss_val = torch.tensor(0.0, device=device)
+                    current_input_val = data_val[:, 0]
+                    steps_val = data_val.shape[1] - 1
+
+                    for t in range(steps_val):
+                        target_frame_val = data_val[:, t + 1]
+                        pred_val = model(current_input_val, time=None)
+                        loss_val += criterion(pred_val, target_frame_val)
+                        current_input_val = pred_val
+
+                    running_val_loss += loss_val.item()
+            
+            avg_val_loss = running_val_loss / (batch_idx_val + 1) if (batch_idx_val + 1) > 0 else 0
+
+        # --- Scheduler Step ---
+        current_lr = optimizer.param_groups[0]["lr"]
+        scheduler.step()
+
+        # --- Logging (Master Only) ---
+        if is_master:
+            log_dict = {
+                "epoch": epoch + 1,
+                "training_loss": avg_train_loss,
+                "validation_loss": avg_val_loss,
+                "learning_rate": current_lr,
+                "best_traj_time": best_traj_time,
+                "best_traj_error": best_traj_error
+            }
+            
+            # Access underlying model if wrapped in DDP
+            if isinstance(model, DDP):
+                model_to_eval = model.module
+            else:
+                model_to_eval = model
+
+            # Run trajectory evaluation
+            log_dict = traj_eval_step(
+                traj_loader, 
+                epoch, 
+                epoch_sampling_frequency, 
+                model_to_eval, 
+                device, 
+                all_configs, 
+                log_dict, 
+                checkpoint_dir
+            )
+
+            # Update local bests
+            if 'best_traj_time' in log_dict:
+                best_traj_time = log_dict['best_traj_time']
+            if 'best_traj_error' in log_dict:
+                best_traj_error = log_dict['best_traj_error']
+
+            wandb.log(log_dict)
+
+            print(f"Epoch [{epoch+1}/{num_epochs}] | "
+                  f"Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} | "
+                  f"LR: {current_lr:.2e}")
+
+    if is_master:
+        print("Training complete!")
+        
     return model

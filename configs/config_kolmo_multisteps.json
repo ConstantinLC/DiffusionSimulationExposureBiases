@@ -1,17 +1,17 @@
 {
     "train_params": {
         "num_epochs": 101,
-        "learning_rate_start": 0.00001,
-        "learning_rate_end": 0.00001,
+        "learning_rate_start": 0.0001,
+        "learning_rate_end": 0.000001,
         "T_max": 101,
         "device": "cuda",
         "channels_per_frame": 2,
-        "epoch_sampling_frequency": 20,
-        "first_ar_step_noising_step_limit": 5,
-        "backgrad": false,
+        "epoch_sampling_frequency": 100,
+        "backgrad": true,
         "n_proxy_steps": 0
     },
     "data_params": {
+        "base_checkpoint_dir": "./checkpoints/KolmogorovFlow/multisteps/",
         "dataset_name": "KolmogorovFlow",
         "data_path": "/mnt/SSD2/constantin/sda/data",
         "resolution": 64,
@@ -26,7 +26,8 @@
     "loss_params": {
         "name": "mse",
         "image_size": [64, 64],
-        "eval_traj_metric": "vorticity_corr"
+        "eval_traj_metrics": ["vort_corr", "mse"],
+        "primary_metric": "vort_corr"
     },
     "model_params": {
         "dimension": 2,
@@ -34,16 +35,17 @@
         "condChannels": 2,
         "dataChannels": 2,
         "diffSchedule": "linear",
-        "diffSteps": 100,
+        "diffSteps": 20,
         "inferenceSamplingMode": "ddpm",
         "inferenceConditioningIntegration": "clean",
         "diffCondIntegration": "clean",
-        "padding_mode": "circular"
+        "padding_mode": "circular",
+        "architecture": "Unet2D",
+        "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/KolmogorovFlow/baselines/adaptive_20steps/finetuning_iteration1.pth",
+        "load_betas": true
     },
-    "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/run_628/round_7/best_model.pth",
-    "noise_levels_json": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/run_628/round_7/schedule_params.json",
     "wandb_params": {
-        "project": "multi-steps-diffusion-training",
+        "project": "KolmogorovFlow",
         "entity": "cleclei",
         "name": "dry-run"
     }

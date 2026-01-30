@@ -8,6 +8,7 @@
         "epoch_sampling_frequency": 50
     },
     "data_params": {
+        "base_checkpoint_dir": "./checkpoints/TransonicFlow/adaptive/",
         "dataset_name": "TransonicFlow",
         "data_path": "/mnt/SSD2/constantin/autoreg-pde-diffusion/data",
         "resolution": 64,
@@ -26,7 +27,7 @@
     "model_params": {
         "dimension": 2,
         "dataSize": [128, 64],
-        "condChannels": 5,
+        "condChannels": 10,
         "dataChannels": 5,
         "diffSchedule": "Log-1-Min+",
         "diffSteps": 100,
@@ -37,7 +38,7 @@
     },
     "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/run_658/round_1/epoch_101.pth",
     "wandb_params": {
-        "project": "multi-steps-diffusion-training",
+        "project": "TransonicFlow",
         "entity": "cleclei",
         "name": "dry-run"
     }

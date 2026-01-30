@@ -225,7 +225,9 @@ class Unet(nn.Module):
         # determine dimensions
         self.channels = channels
         if sigmas is not None:
-            self.sigmas = torch.ravel(sigmas).to('cuda')
+            sigmas = torch.ravel(sigmas)
+            self.sigmas = sigmas.to('cuda')
+            #self.register_buffer("sigmas", sigmas)
 
         init_dim = init_dim if init_dim is not None else dim // 3 * 2
         self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3, padding_mode=self.padding_mode)
@@ -295,20 +297,6 @@ class Unet(nn.Module):
         self.final_conv = nn.Sequential(
             block_klass(dim, dim), nn.Conv2d(dim, out_dim, 1, padding_mode=self.padding_mode)
         )
-
-    # returns low and high-passed filter data separately
-    def separateFrequencies(self, data: torch.Tensor, device="cuda", cutoff_frequency=4):
-        npix = data.shape[-1]
-        fft_data = torch.fft.fft2(data)
-        kfreq = torch.fft.fftfreq(npix) * npix
-        kfreq2D = torch.meshgrid(kfreq, kfreq)
-        knrm = torch.sqrt(kfreq2D[0]**2 + kfreq2D[1]**2)
-        fft_highpass = fft_data * (knrm > cutoff_frequency).to(device=device)
-        fft_lowpass = fft_data * (knrm <= cutoff_frequency).to(device=device)
-        data_highpass = torch.real(torch.fft.ifft2(fft_highpass))
-        data_lowpass = torch.real(torch.fft.ifft2(fft_lowpass))
-        #print(data_highpass, data_lowpass)
-        return data_lowpass, data_highpass
 
 
     def forward(self, x, time):
