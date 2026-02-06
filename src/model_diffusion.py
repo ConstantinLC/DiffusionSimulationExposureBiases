@@ -16,7 +16,7 @@ from src.model_1d import Unet1D
 class DiffusionModel(nn.Module):
 
     def __init__(self, dimension, dataSize, condChannels, dataChannels, diffSchedule, diffSteps, 
-                 inferenceSamplingMode, inferenceConditioningIntegration, diffCondIntegration, 
+                 inferenceSamplingMode, inferenceConditioningIntegration, diffCondIntegration,
                  inferenceInitialSampling = "random", padding_mode='circular',
                 architecture="ours", checkpoint="", load_betas=False):
         super(DiffusionModel, self).__init__()
@@ -72,25 +72,25 @@ class DiffusionModel(nn.Module):
                             torch.logspace(-0.1, -0.0001, 5))))
             self.timesteps=100
         elif diffSchedule == "inverseCosLog-1.25":
-            sigmas = cosine_sigma_schedule(10**-1.25, 10**-0.0001, 20).to('cuda')
-            training_sigmas = torch.concatenate((torch.ones(80).to('cuda')*sigmas[0], sigmas))
+            sigmas = cosine_sigma_schedule(10**-1.25, 10**-0.0001, 20).to(device)
+            training_sigmas = torch.concatenate((torch.ones(80).to(device)*sigmas[0], sigmas))
             betas = betas_from_sqrtOneMinusAlphasCumprod(training_sigmas)
             self.timesteps=100
         elif diffSchedule == "inverseCosLog-1.15":
-            sigmas = cosine_sigma_schedule(10**-1.15, 10**-0.0001, 20).to('cuda')
-            training_sigmas = torch.concatenate((torch.ones(80).to('cuda')*sigmas[0], sigmas))
+            sigmas = cosine_sigma_schedule(10**-1.15, 10**-0.0001, 20).to(device)
+            training_sigmas = torch.concatenate((torch.ones(80).to(device)*sigmas[0], sigmas))
             betas = betas_from_sqrtOneMinusAlphasCumprod(training_sigmas)
             self.timesteps=100
         elif diffSchedule == "inverseCosLog-0.8":
-            sigmas = cosine_sigma_schedule(10**-0.8, 10**-0.0001, 20).to('cuda')
-            training_sigmas = torch.concatenate((torch.ones(80).to('cuda')*sigmas[0], sigmas))
+            sigmas = cosine_sigma_schedule(10**-0.8, 10**-0.0001, 20).to(device)
+            training_sigmas = torch.concatenate((torch.ones(80).to(device)*sigmas[0], sigmas))
             betas = betas_from_sqrtOneMinusAlphasCumprod(training_sigmas)
             self.timesteps=100
         elif diffSchedule == "initial_exploration":
-            betas = initial_exploration_beta_schedule(min_log_value=-2.2, timesteps=self.timesteps)
+            betas = initial_exploration_beta_schedule(min_log_value=-2.5, timesteps=self.timesteps)
         else:
             raise ValueError("Unknown variance schedule")
-
+        
         self.condChannels = condChannels
         self.dataChannels = dataChannels
         if self.architecture == "ACDM":
@@ -109,7 +109,7 @@ class DiffusionModel(nn.Module):
             dim_mults=(1,1,1),
             use_convnext=True,
             convnext_mult=1,
-            padding_mode=padding_mode
+            padding_mode=padding_mode,
             )
 
         elif self.architecture == "Unet1D":
@@ -123,13 +123,27 @@ class DiffusionModel(nn.Module):
             )
         
         else : raise Exception
-        if checkpoint != "":
+        """if checkpoint != "":
             print(f"Loading Checkpoint from {checkpoint}")
             ckpt = torch.load(checkpoint)
             if 'stateDictDecoder' in ckpt.keys():
                 ckpt = ckpt['stateDictDecoder']
             checkpoint_unet = {key[5:]:ckpt[key] for key in ckpt if 'unet' in key and not 'sigmas' in key}
             self.unet.load_state_dict(checkpoint_unet)
+            if load_betas and 'betas' in ckpt: 
+                betas = ckpt['betas']"""
+        
+        if checkpoint != "":
+            print(f"Loading Checkpoint from {checkpoint}")
+            ckpt = torch.load(checkpoint)
+            if 'stateDictDecoder' in ckpt.keys():
+                ckpt = ckpt['stateDictDecoder']
+            if 'model_state_dict' in ckpt.keys():
+                ckpt = ckpt['model_state_dict']
+            if not 'sigmas' in ckpt.keys():
+                ckpt['sigmas'] = torch.tensor([1])
+            #checkpoint_unet = {key[5:]:ckpt[key] for key in ckpt if 'unet' in key and not 'sigmas' in key}
+            self.unet.load_state_dict(ckpt)
             if load_betas and 'betas' in ckpt: 
                 betas = ckpt['betas']
 
@@ -175,12 +189,11 @@ class DiffusionModel(nn.Module):
         self.register_buffer("sqrtPosteriorVariance", prep(sqrtPosteriorVariance))
 
         sigmas = (sqrtAlphasCumprod / sqrtOneMinusAlphasCumprod)
-        self.unet.sigmas = sigmas.to('cuda')
-
+        self.unet.sigmas = sigmas
         self.timesteps = len(betas)
 
     def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False, 
-                input_type:str = "ancestor") -> torch.Tensor:
+                input_type:str = "ancestor", lower_timestep_limit:int = 0) -> torch.Tensor:
 
         device = conditioning.device
         

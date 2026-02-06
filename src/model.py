@@ -216,18 +216,16 @@ class Unet(nn.Module):
         resnet_block_groups=8,
         use_convnext=True,
         convnext_mult=2,
-        padding_mode="circular",
-    ):
+        padding_mode="circular"):
         super().__init__()
 
         self.padding_mode = padding_mode
-
         # determine dimensions
         self.channels = channels
         if sigmas is not None:
             sigmas = torch.ravel(sigmas)
-            self.sigmas = sigmas.to('cuda')
-            #self.register_buffer("sigmas", sigmas)
+            #self.sigmas = sigmas.to(self.device)
+            self.register_buffer("sigmas", sigmas)
 
         init_dim = init_dim if init_dim is not None else dim // 3 * 2
         self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3, padding_mode=self.padding_mode)

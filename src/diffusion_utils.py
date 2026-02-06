@@ -151,7 +151,7 @@ def compute_estimate(model, k, cond, gt):
     return dNoisy
 
 
-def evaluate_dw_train_inf_gap(models, val_loader, device):
+def evaluate_dw_train_inf_gap0(models, val_loader, device, n_batches, input_types=['ancestor', 'clean', 'own-pred', 'prev-pred']):
     """
     Runs autoregressive rollout for multiple models over the FULL dataset.
     """
@@ -171,6 +171,9 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
         mse_clean_prev_pred_all = {name: [] for name in models}
 
         for batch_idx, sample in enumerate(val_loader):
+
+            if batch_idx == n_batches:
+                break
             
             # --- A. Prepare Batch ---
             data = sample["data"].to(device) # (B, T_total, C, H, W)
@@ -184,9 +187,9 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
             for name in models:
                 # Store prediction
                 model = models[name]
+
                 _, x0_estimates = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="ancestor")
                 _, x0_estimates_clean = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="clean")
-
                 _, x0_estimates_clean_own_pred = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="own-pred")
                 _, x0_estimates_clean_prev_pred = model(conditioning=conditioning_frame, data=target_frame, return_x0_estimate=True, input_type="prev-pred")
 
@@ -208,8 +211,6 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
                 mse_clean_own_pred_all[name].append(mse_clean_own_pred)
                 mse_clean_prev_pred_all[name].append(mse_clean_prev_pred)
 
-            if batch_idx == 0:
-                break
 
     # 3. Aggregate results
    
@@ -230,3 +231,77 @@ def evaluate_dw_train_inf_gap(models, val_loader, device):
         "mse_clean_own_pred": mean_mse_clean_own_pred,   # (N_total, T, C, H, W)
         "mse_clean_prev_pred": mean_mse_clean_prev_pred,   # (N_total, T, C, H, W)
     }
+
+
+
+def evaluate_dw_train_inf_gap(models, val_loader, n_batches, metric, device, input_types=['ancestor', 'clean', 'own-pred', 'prev-pred']):
+    """
+    Runs autoregressive rollout for multiple models over the FULL dataset.
+    Dynamically handles different input types to avoid code duplication.
+    """
+    # 1. Set models to eval mode
+    for model in models.values():
+        model.eval()
+    
+    # 2. Initialize storage dictionary dynamically based on input_types
+    # Structure: raw_metrics[input_type][model_name] = [list of batch results]
+    raw_metrics = {itype: {name: [] for name in models} for itype in input_types}
+
+    print(f"Starting evaluation over full dataset ({len(val_loader)} batches) for types: {input_types}...")
+
+    with torch.no_grad():
+        for batch_idx, sample in enumerate(val_loader):
+            if batch_idx == n_batches:
+                break
+            
+            # --- Prepare Batch ---
+            data = sample["data"].to(device)
+            
+            # Initial Condition (t=0) and Target
+            conditioning_frame = data[:, 0]
+            target_frame = data[:, 1]
+
+            for name, model in models.items():
+                # Loop through the requested input types to avoid duplication
+                for itype in input_types:
+                    # Run model with specific input type
+                    _, x0_estimates = model(
+                        conditioning=conditioning_frame, 
+                        data=target_frame, 
+                        return_x0_estimate=True, 
+                        input_type=itype
+                    )
+
+                    # Calculate MSE for each time step in the diffusion process
+                    # x0_estimates is typically a list of tensors over diffusion timesteps
+                    if metric == 'mse':
+                        criterion = F.mse_loss
+                    elif metric == 'mae':
+                        criterion = F.l1_loss
+                    mse_list = [
+                        criterion(estimate, target_frame).item()
+                        for estimate in x0_estimates
+                    ]
+                    
+                    raw_metrics[itype][name].append(mse_list)
+
+    # 3. Aggregate results
+    final_results = {}
+    
+    for itype in input_types:
+        # Create a dictionary for this specific input type (e.g., mean_mse_ancestor)
+        # We format the key to match the original style (e.g., 'ancestor' -> 'mse_ancestor')
+        metric_key = f"mse_{itype.replace('-', '_')}"
+        final_results[metric_key] = {}
+        
+        for name in models:
+            # Concatenate all batches along dimension 0 and compute mean
+            if raw_metrics[itype][name]:
+                # Convert list of lists to tensor: (N_batches, T_steps) -> Mean over batches -> (T_steps)
+                final_results[metric_key][name] = torch.mean(
+                    torch.tensor(raw_metrics[itype][name]), dim=0
+                )
+            else:
+                final_results[metric_key][name] = torch.tensor([])
+
+    return final_results
