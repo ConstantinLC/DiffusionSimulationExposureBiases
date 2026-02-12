@@ -1,9 +1,9 @@
 {
     "train_params": {
-        "num_epochs": 10001,
-        "learning_rate_start": 0.00001,
-        "learning_rate_end": 0.00001,
-        "T_max": 1001,
+        "num_epochs": 2001,
+        "learning_rate_start": 0.0001,
+        "learning_rate_end": 0.000001,
+        "T_max": 2001,
         "device": "cuda",
         "epoch_sampling_frequency": 50
     },
@@ -23,8 +23,8 @@
     "loss_params": {
         "name": "mse",
         "image_size": [64, 64],
-        "eval_traj_metrics": ["mse", "corr"],
-        "primary_metric": "corr"
+        "eval_traj_metrics": ["mse", "vort_corr"],
+        "primary_metric": "vort_corr"
     },
     "model_params": {
         "dim":64,
@@ -34,7 +34,7 @@
         "with_time_emb":false,
         "padding_mode":"circular"
     },
-    "checkpoint": "/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/KolmogorovFlow/Unet/KolmogorovFlow/run_8/epoch_351.pth",
+    "checkpoint": "",
     "wandb_params": {
         "project": "KolmogorovFlow",
         "entity": "cleclei",
