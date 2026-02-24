@@ -1,0 +1,39 @@
+defaults:
+  - model: unet_2d
+  - dataset: kolmogorov
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+
+checkpoint_dir: ???   # must be set per experiment
+debugging: false
+
+training:
+  num_epochs: ???
+  learning_rate_start: 1e-4
+  learning_rate_end: 1e-6
+  T_max: ???
+  device: cuda
+  epoch_sampling_frequency: 50
+  backgrad: false
+  n_proxy_steps: 0
+  tau: 1.05
+  binary_search_steps: 0
+  finetuning_steps: 0
+  perform_binary_search: false
+  best_log_sigma: null
+  channels_per_frame: null
+  first_ar_step_noising_step_limit: null
+
+loss:
+  name: mse
+  image_size: [64, 64]
+  eval_traj_metrics: [mse]
+  primary_metric: mse
+
+wandb:
+  project: ???
+  entity: cleclei
+  name: ""
