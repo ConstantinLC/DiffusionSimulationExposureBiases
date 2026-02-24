@@ -1,0 +1,13 @@
+# @package model
+class: DiffusionModel
+
+dimension: 2
+diffSchedule: linear
+diffSteps: 20
+inferenceSamplingMode: ddpm
+inferenceConditioningIntegration: clean
+diffCondIntegration: clean
+padding_mode: same
+architecture: ACDM
+checkpoint: ""
+load_betas: false

@@ -1,0 +1,30 @@
+# @package _global_
+defaults:
+  - override /model: unet_1d
+
+data:
+  dataset_name: KuramotoSivashinsky
+  data_path: /mnt/SSD2/constantin/archives/LPSDA/data_og
+  resolution: 64
+  frames_per_step: 4
+  traj_length: 160
+  frames_per_time_step: 1
+  limit_trajectories_train: -1
+  limit_trajectories_val: 64
+  batch_size: 64
+  val_batch_size: 512
+
+model:
+  dimension: 1
+  dataSize: [64]
+  condChannels: 1
+  dataChannels: 1
+  padding_mode: circular
+
+
+loss:
+  eval_traj_metrics: [mse, corr]
+  primary_metric: corr
+
+wandb:
+  project: KuramotoSivashinsky

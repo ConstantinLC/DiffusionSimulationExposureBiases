@@ -1,0 +1,30 @@
+# @package _global_
+defaults:
+  - override /model: unet_2d
+
+data:
+  dataset_name: KolmogorovFlow
+  data_path: /mnt/SSD2/constantin/sda/data
+  resolution: 64
+  frames_per_step: 1
+  traj_length: 64
+  frames_per_time_step: 1
+  limit_trajectories_train: 819
+  limit_trajectories_val: 102
+  batch_size: 32
+  val_batch_size: 16
+
+model:
+  dimension: 2
+  dataSize: [64, 64]
+  condChannels: 2
+  dataChannels: 2
+  padding_mode: circular
+  
+
+loss:
+  eval_traj_metrics: [mse, vort_corr]
+  primary_metric: vort_corr
+
+wandb:
+  project: KolmogorovFlow

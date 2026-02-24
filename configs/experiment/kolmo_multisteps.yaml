@@ -1,0 +1,21 @@
+# @package _global_
+defaults:
+  - override /dataset: kolmogorov
+
+checkpoint_dir: ./checkpoints/KolmogorovFlow/multisteps/
+
+training:
+  num_epochs: 201
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-6
+  T_max: 201
+  device: cuda
+  epoch_sampling_frequency: 100
+  backgrad: true
+  n_proxy_steps: 0
+
+data:
+  prediction_steps: 2
+
+model:
+  load_betas: true

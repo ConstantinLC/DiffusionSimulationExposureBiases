@@ -1,0 +1,9 @@
+# @package model
+class: DiffusionModel
+
+diffSchedule: linear
+diffSteps: 20
+inferenceSamplingMode: ddpm
+inferenceConditioningIntegration: clean
+diffCondIntegration: clean
+checkpoint: ""

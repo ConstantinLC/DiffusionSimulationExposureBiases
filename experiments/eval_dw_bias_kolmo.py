@@ -1,0 +1,173 @@
+#!/usr/bin/env python
+import os
+import argparse
+import json
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import pearsonr
+from torch import nn
+
+import sys
+sys.path.append('/mnt/SSD2/constantin/diffusion-multisteps')
+
+# --- Project Imports ---
+from src.data_loader import get_data_loaders
+from src.model_diffusion import DiffusionModel
+from src.model import Unet
+from src.utils import count_parameters, parse_checkpoint_args, run_model, run_model
+from src.diffusion_utils import adapt_schedule
+from src.diffusion_utils import evaluate_dw_train_inf_gap
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate Diffusion Models on Turbulence Data")
+    
+    # Paths
+    parser.add_argument('--data_path', type=str, required=True, help="Path to dataset root")
+    
+    # UPDATED ARGUMENT:
+    parser.add_argument('--checkpoints', nargs='+', required=True, 
+                        help="List of checkpoints. Format: 'Name=/path/to/ckpt.pth'. Space separated.")
+    
+    parser.add_argument('--output_dir', type=str, default="./results", help="Directory to save plots and metrics")
+    
+    # Params
+    parser.add_argument('--resolution', type=int, default=64)
+    parser.add_argument('--limit_val_trajectories', type=int, default=1) 
+    parser.add_argument('--device', type=str, default='cuda')
+
+    args = parser.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 0. Parse Checkpoints into Dictionary
+    checkpoints_dict = parse_checkpoint_args(args.checkpoints)
+    print(f"--- Evaluating {len(checkpoints_dict)} Models ---")
+    for name, path in checkpoints_dict.items():
+        print(f"  > {name}: {path}")
+
+    # 1. Load Data
+    print("--- Loading Data ---")
+    data_params = {
+        "data_path": args.data_path,
+        "dataset_name": "KolmogorovFlow",
+        "resolution": args.resolution,
+        "sequence_length": [2, 1],
+        "trajectory_sequence_length": [64, 1], 
+        "frames_per_time_step": 1,
+        "limit_trajectories_train": 100,
+        "limit_trajectories_val": args.limit_val_trajectories, 
+        "batch_size": 200,
+        "val_batch_size": 200
+    }
+    _, val_loader, _ = get_data_loaders(data_params)
+
+    # 2. Load Candidate Models (Looping over Dictionary)
+    models = {}
+    for name, ckpt_path in checkpoints_dict.items():
+        print(f"--- Loading Candidate: {name} ---")
+        
+        # Initialize Architecture
+        model = DiffusionModel(
+            dimension=2,
+            dataSize=[64, 64],
+            condChannels=2,
+            dataChannels=2,
+            diffSchedule=name,
+            diffSteps=100,
+            inferenceSamplingMode="ddpm",
+            inferenceConditioningIntegration="clean",
+            diffCondIntegration="clean",
+            inferenceInitialSampling="random",
+        ).to(args.device)
+        
+        # Load weights
+        ckpt = torch.load(ckpt_path, map_location=args.device)
+        if 'state_dict' in ckpt:
+            model.load_state_dict(ckpt['state_dict'])
+        else:
+            ckpt = {k:ckpt[k] for k in ckpt if 'unet' in k and not 'sigmas' in k}
+            model.load_state_dict(ckpt)
+            
+        models[name] = model
+
+    # 3. Evaluate train input vs inference input predictions
+    results = evaluate_dw_train_inf_gap(models, val_loader, device='cuda')
+
+    n_models = len(checkpoints_dict.items())
+    fig, axes = plt.subplots(2, n_models, figsize=(3*len(models), 6), sharex=True)
+
+    colors = ['purple', 'blue', 'red']
+
+    # --------------------
+    for i, model_name in enumerate(models):
+        model = models[model_name]
+        mse_ancestor = results['mse_ancestor'][model_name]
+        mse_clean = results['mse_clean'][model_name]
+        mse_clean_own_pred = results['mse_clean_own_pred'][model_name]
+        mse_clean_prev_pred = results['mse_clean_prev_pred'][model_name]
+        alphas = list(models[model_name].sqrtOneMinusAlphasCumprod.ravel().cpu())[::-1]
+
+        axes[0,i].hist(alphas, alpha=0.2, color=colors[i], bins=np.logspace(-2.5, 0, 20))
+
+        tau = 1.05
+
+        # Plot curves
+        axes[1,i].plot(alphas, mse_clean,
+                    label="Training input", color=colors[i], linestyle='dotted')
+        axes[1,i].plot(alphas, mse_ancestor,
+                    label="Inference input", color=colors[i])
+        axes[1,i].plot(alphas, mse_clean_own_pred,
+                    label="Inference input", color=colors[i], linestyle='dashdot')
+        axes[1,i].plot(alphas, mse_clean_prev_pred,
+                    label="Inference input", color=colors[i], linestyle='dotted')
+        
+        
+        for j in range(len(mse_clean)):
+            prev_ratio = mse_clean_prev_pred[j]/mse_clean[j]
+            own_ratio = mse_clean_own_pred[j]/mse_clean[j]
+            print(alphas[j], mse_clean[j])
+            if own_ratio > tau:
+                print("Own error too high", own_ratio)
+            elif prev_ratio > tau:
+                print("Own error good, Prev error too high", prev_ratio)
+            else:
+                print("All good")
+        #print("Prev-Pred error:", list(zip(alphas, )))
+
+        # --- The Schedule Adaptation Function ---
+        noise_levels = model.sqrtOneMinusAlphasCumprod.ravel()
+        print(noise_levels)
+        new_noise_levels = adapt_schedule(noise_levels, torch.flip(mse_clean_own_pred, [0]), torch.flip(mse_clean_prev_pred, [0]), torch.flip(mse_clean, [0]), tau, 0.1, 85)
+        print(new_noise_levels)
+
+        # Grid and title
+        axes[1,i].grid(True, which='both', linestyle='--', alpha=0.3)
+        axes[0,i].set_title(model_name)
+
+        # --- Add final-value text under the title ---
+        print(model_name, "Clean:", mse_clean[-1], "Ancestor:", mse_ancestor[-1])
+
+        fig.text(
+            0.2 + i*0.33,   # places 3 groups left→right
+            0,            # slightly below suptitle
+            f"Training Final Error:  {mse_clean[-1]:.2e}\n"
+            f"Inference Final Error: {mse_ancestor[-1]:.2e}\n"
+            f"Training Own Pred Final Error: {mse_clean_own_pred[-1]:.2e}",
+            ha='center',
+            va='top',
+            fontsize=8,
+            color=colors[i]
+        )
+
+    for i in range(len(models)):
+        axes[1,i].sharey(axes[1,-1])
+        axes[1,i].legend(fontsize=8)
+        
+
+    axes[0,0].set_xscale('log')
+    axes[1,0].set_yscale('log')
+    axes[1,0].set_ylabel('MSE w/ ground-truth')
+    axes[0,0].set_ylabel('Noise Level sqrt(1-ᾱₜ) Distribution')
+    axes[1,1].set_xlabel('Noise Level sqrt(1-ᾱₜ), High = Only Noise, Low = Only Image')
+
+    plt.savefig(os.path.join(args.output_dir, "train-inf-gap.pdf"), bbox_inches="tight")

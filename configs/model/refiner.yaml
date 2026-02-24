@@ -1,0 +1,7 @@
+# @package model
+class: PDERefiner
+
+refinementSteps: 3
+log_sigma_min: -1.5
+padding_mode: 'circular'
+checkpoint: ""

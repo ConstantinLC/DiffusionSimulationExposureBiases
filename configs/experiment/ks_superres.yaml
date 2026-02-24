@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - override /dataset: ks
+
+checkpoint_dir: ./checkpoints/KuramotoSivashinsky/superres/
+
+training:
+  num_epochs: 1001
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-6
+  T_max: 1001
+  device: cuda
+  epoch_sampling_frequency: 50
+
+data:
+  prediction_steps: 1
+  super_resolution: True
