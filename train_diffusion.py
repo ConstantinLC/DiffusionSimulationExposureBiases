@@ -1,100 +1,94 @@
 import os
 import json
-import argparse
 import torch
 from torch import nn
 import wandb
-from torch import optim
-from src.data_loader import get_data_loaders
-from src.model_diffusion import DiffusionModel
-from src.trainer import train_diffusion_model, train_diffusion_model_multisteps
-from src.utils import count_parameters
-from src.utils import get_next_run_number
 from torch.nn import functional as F
-from src.diffusion_utils import betas_from_sqrtOneMinusAlphasCumprod
+import hydra
+from omegaconf import DictConfig
 
-def main():
-    parser = argparse.ArgumentParser(description="Train a diffusion model.")
-    parser.add_argument('--config', type=str, default='configs/config.json',
-                        help='Path to configuration JSON file.')
-    args = parser.parse_args()
+from src.config import ExperimentConfig
+from src.data.loaders import get_data_loaders
+from src.models.diffusion import DiffusionModel
+from src.training.diffusion_trainer import train_diffusion_model, train_diffusion_model_multisteps
+from src.utils.general import count_parameters, get_next_run_number
+from src.utils.diffusion import betas_from_sqrtOneMinusAlphasCumprod
+from src.utils.multigpu import setup_ddp, cleanup
 
-    # Load config
-    with open(args.config, 'r') as f:
-        config = json.load(f)
-    print(f"Loaded config from: {args.config}")
-    
+
+@hydra.main(version_base=None, config_path="configs", config_name="config")
+def main(cfg: DictConfig) -> None:
+    config = ExperimentConfig.from_hydra(cfg)
+
+    device = torch.device(config.training.device)
+
     # --- Setup checkpoint directory ---
-    base_checkpoint_dir = config["data_params"]["base_checkpoint_dir"]
-    run_number = get_next_run_number(base_checkpoint_dir)
-    checkpoint_dir = os.path.join(base_checkpoint_dir, f'run_{run_number}')
+    run_number = get_next_run_number(config.checkpoint_dir)
+    checkpoint_dir = os.path.join(config.checkpoint_dir, f'run_{run_number}')
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Artifacts for this run will be saved in: {checkpoint_dir}")
 
     # Save config in checkpoint folder
+    legacy = config.to_legacy_dict()
     config_path = os.path.join(checkpoint_dir, 'config.json')
     with open(config_path, 'w') as f:
-        json.dump(config, f, indent=4)
+        json.dump(legacy, f, indent=4)
 
-    # --- Initialize W&B here ---
-    project = config['wandb_params']['project']
-    entity = config['wandb_params']['entity']
+    # --- Initialize W&B ---
     wandb.init(
-        project=project,
-        entity=entity,
+        project=config.wandb.project,
+        entity=config.wandb.entity,
         name=f"run_{run_number}",
-        group=os.path.splitext(os.path.basename(args.config))[0],  # group by config file
-        config=config
+        config=legacy
     )
 
     # --- Initialize model and data ---
-    train_loader, val_loader, traj_loader = get_data_loaders(config['data_params'])
-    model = DiffusionModel(**config['model_params'])
+    train_loader, val_loader, traj_loader = get_data_loaders(config.data)
+    model = DiffusionModel(**legacy['model_params'])
+    model.to(device)
 
     print(f"Model has {count_parameters(model)} parameters.")
 
     # Initialize loss function
-    if config['loss_params']['name'] == 'mse':
+    if config.loss.name == 'mse':
         print("Using MSELoss")
         criterion = nn.MSELoss()
-    elif config['loss_params']['name'] == 'l1':
+    elif config.loss.name == 'l1':
         print("Using L1-Loss")
         criterion = F.smooth_l1_loss
     else:
-        raise ValueError(f"Unknown loss function name: {config['loss_params']['name']}")
-    
+        raise ValueError(f"Unknown loss function name: {config.loss.name}")
 
-    #ckpt = torch.load("/mnt/SSD2/constantin/diffusion-multisteps/checkpoints/KuramotoSivashinsky/baselines/adaptive_20steps/finetuning_iteration0.pth")
-    #betas = ckpt['betas'].ravel()
-    #sigmas = model.sqrtOneMinusAlphasCumprod.ravel()
-    #sigmas = torch.concatenate((torch.ones(80).to('cuda')* sigmas[0], sigmas))
-    #model.compute_schedule_variables(sigmas=sigmas)
-    
     # Start training
-    if config['data_params']['sequence_length'][0] == 2:
+    if config.data.prediction_steps == 1:
         trained_model = train_diffusion_model(
-            model, 
-            train_loader, 
-            val_loader, 
+            model,
+            train_loader,
+            val_loader,
             traj_loader,
-            config['train_params'], 
-            criterion, 
-            config,
-            checkpoint_dir
+            legacy['train_params'],
+            criterion,
+            legacy,
+            checkpoint_dir,
+            device=device,
+            is_master=True
         )
     else:
         trained_model = train_diffusion_model_multisteps(
-            model, 
-            train_loader, 
-            val_loader, 
+            model,
+            train_loader,
+            val_loader,
             traj_loader,
-            config['train_params'], 
-            criterion, 
-            config,
-            checkpoint_dir
+            legacy['train_params'],
+            criterion,
+            legacy,
+            checkpoint_dir,
+            device=device,
+            is_master=True
         )
 
     wandb.finish()
+
 
 if __name__ == '__main__':
     main()
