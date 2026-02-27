@@ -1,5 +1,5 @@
 # @package model
-class: DiffusionModel
+type: DiffusionModel
 
 diffSchedule: linear
 diffSteps: 20

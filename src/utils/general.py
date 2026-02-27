@@ -547,26 +547,23 @@ def get_next_run_number(base_dir):
         return max(run_numbers) + 1
 
 
-def get_run_dir_name(base_dir, model_class_name, model_cfg_raw):
+def get_run_dir_name(base_dir, model_cfg):
     """
-    Builds a descriptive run directory name based on model class and key hyperparameters.
+    Builds a descriptive run directory name based on model config type and key hyperparameters.
 
     - DiffusionModel: DiffusionModel_{schedule}_{steps}
     - PDERefiner:     PDERefiner_{refinementSteps}_{log_sigma_min}
-    - Others:         {ClassName}
+    - Others:         {type}
 
     If the directory already exists, appends an incrementing index (_1, _2, ...).
     """
-    if model_class_name == "DiffusionModel":
-        schedule = model_cfg_raw.get("diffSchedule", "linear")
-        steps = model_cfg_raw.get("diffSteps", 20)
-        base_name = f"DiffusionModel_{schedule}_{steps}"
-    elif model_class_name == "PDERefiner":
-        ref_steps = model_cfg_raw.get("refinementSteps", 3)
-        log_sigma_min = model_cfg_raw.get("log_sigma_min", -1.5)
-        base_name = f"PDERefiner_{ref_steps}_{log_sigma_min}"
+    from src.config import DiffusionModelConfig, RefinerConfig
+    if isinstance(model_cfg, DiffusionModelConfig):
+        base_name = f"DiffusionModel_{model_cfg.diffSchedule}_{model_cfg.diffSteps}"
+    elif isinstance(model_cfg, RefinerConfig):
+        base_name = f"PDERefiner_{model_cfg.refinementSteps}_{model_cfg.log_sigma_min}"
     else:
-        base_name = model_class_name
+        base_name = model_cfg.type
 
     candidate = base_name
     if not os.path.exists(os.path.join(base_dir, candidate)):

@@ -2,7 +2,7 @@
 defaults:
   - override /dataset: kolmogorov
 
-checkpoint_dir: ./checkpoints/KolmogorovFlow/superres/
+checkpoint_dir: ./checkpoints/KolmogorovFlow/super_resolution
 
 training:
   num_epochs: 1001

@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Literal, Optional
+from pydantic import BaseModel, Field
+from typing import Literal, Optional, Union
 from omegaconf import DictConfig, OmegaConf
 
 
@@ -19,6 +19,7 @@ class TrainingConfig(BaseModel):
     best_log_sigma: Optional[float] = None
     channels_per_frame: Optional[int] = None
     first_ar_step_noising_step_limit: Optional[int] = None
+    end_to_end: bool = False
 
 
 class DataConfig(BaseModel):
@@ -45,26 +46,60 @@ class DataConfig(BaseModel):
         return [self.traj_length, self.frames_per_step]
 
 
-class ModelConfig(BaseModel):
+# ---------------------------------------------------------------------------
+# Per-model config classes
+# ---------------------------------------------------------------------------
+
+class _NeuralBase(BaseModel):
+    """Fields common to all model types (injected by dataset configs)."""
     dimension: int = 2
     dataSize: list[int]
     condChannels: int
     dataChannels: int
+    padding_mode: str = "circular"
+    checkpoint: str = ""
+
+    class Config:
+        extra = "ignore"  # tolerate unknown YAML keys (e.g. nested legacy blocks)
+
+
+class DiffusionModelConfig(_NeuralBase):
+    type: Literal["DiffusionModel"] = "DiffusionModel"
     diffSchedule: str = "linear"
     diffSteps: int = 20
     inferenceSamplingMode: str = "ddpm"
     inferenceConditioningIntegration: str = "clean"
     diffCondIntegration: str = "clean"
-    padding_mode: str = "circular"
     architecture: str = "Unet2D"
-    checkpoint: str = ""
     load_betas: bool = False
-    # Unet-specific fields (used when class=Unet2D or Unet1D)
+
+
+class RefinerConfig(_NeuralBase):
+    type: Literal["PDERefiner"] = "PDERefiner"
+    refinementSteps: int = 3
+    log_sigma_min: float = -1.5
+    architecture: str = "Unet2D"
+
+
+class _UnetBase(_NeuralBase):
     dim: Optional[int] = None
     dim_mults: list[int] = [1, 1, 1]
     convnext_mult: int = 1
     with_time_emb: bool = False
 
+
+class Unet2DConfig(_UnetBase):
+    type: Literal["Unet2D"] = "Unet2D"
+
+
+class Unet1DConfig(_UnetBase):
+    type: Literal["Unet1D"] = "Unet1D"
+
+
+ModelConfig = Union[DiffusionModelConfig, RefinerConfig, Unet2DConfig, Unet1DConfig]
+
+
+# ---------------------------------------------------------------------------
 
 class LossConfig(BaseModel):
     name: Literal["mse", "l1"] = "mse"
@@ -85,7 +120,7 @@ class ExperimentConfig(BaseModel):
     debugging: bool = False
     training: TrainingConfig
     data: DataConfig
-    model: ModelConfig
+    model: ModelConfig = Field(discriminator="type")
     loss: LossConfig
     wandb: WandbConfig
 

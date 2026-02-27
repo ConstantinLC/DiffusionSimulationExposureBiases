@@ -1,159 +1,254 @@
 import os
 import json
-import argparse
+import inspect
 import torch
 from torch import nn
 import wandb
-import torch.distributed as dist
+from torch.nn import functional as F
+import hydra
+from omegaconf import DictConfig, OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-# Your imports
-from src.data_loader import get_data_loaders
-from src.model_diffusion import DiffusionModel
-from src.utils import count_parameters, get_next_run_number
-from src.trainer_initial_exploration import train_diffusion_single_noise_level
+from src.config import ExperimentConfig
+from src.data.loaders import get_data_loaders
+from src.models.diffusion import DiffusionModel
+from src.training.diffusion_schedule_exploration import train_diffusion_single_noise_level
+from src.utils.general import count_parameters, get_run_dir_name
+from src.utils.diffusion import evaluate_dw_train_inf_gap
+from src.utils.multigpu import setup_ddp, cleanup
 
-def setup_ddp():
-    dist.init_process_group(backend="nccl")
-    local_rank = int(os.environ["LOCAL_RANK"])
-    global_rank = int(os.environ["RANK"])
-    torch.cuda.set_device(local_rank)
-    return local_rank, global_rank
 
-def cleanup():
-    dist.destroy_process_group()
+@hydra.main(version_base=None, config_path="configs", config_name="config")
+def main(cfg: DictConfig) -> None:
+    model_cfg_raw = OmegaConf.to_container(cfg.model, resolve=True)
+    model_class_name = model_cfg_raw.get("class", "DiffusionModel")
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/config.json')
-    args = parser.parse_args()
+    if model_class_name != "DiffusionModel":
+        raise ValueError(
+            f"train_diffusion_initial_exploration only supports DiffusionModel, "
+            f"got '{model_class_name}'"
+        )
 
-    local_rank, global_rank = setup_ddp()
-    is_master = (global_rank == 0)
-    device = torch.device("cuda", local_rank)
+    # Select training params from pretraining/finetuning based on checkpoint presence
+    has_checkpoint = bool(model_cfg_raw.get("checkpoint", ""))
+    training_source = cfg.finetuning if has_checkpoint else cfg.pretraining
+    mode = "finetuning" if has_checkpoint else "pretraining"
+    print(f"Using {mode} training parameters.")
+    cfg = OmegaConf.merge(cfg, {"training": OmegaConf.to_container(training_source, resolve=True)})
 
-    with open(args.config, 'r') as f:
-        config = json.load(f)
-    
-    # --- Setup Directories (Master Only) ---
-    if is_master:
-        base_dir = config["data_params"]["base_checkpoint_dir"]
-        dataset_dir = os.path.join(base_dir, config["data_params"]["dataset_name"])
-        run_number = get_next_run_number(dataset_dir)
-        run_root_dir = os.path.join(dataset_dir, f'run_{run_number}_binary_search')
-        os.makedirs(run_root_dir, exist_ok=True)
-        print(f"[Master] Search Artifacts: {run_root_dir}")
+    config = ExperimentConfig.from_hydra(cfg)
+
+    # --- DDP setup (activated by torchrun) ---
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    is_distributed = local_rank != -1
+
+    if is_distributed:
+        import torch.distributed as dist
+        setup_ddp()
+        device = torch.device(f"cuda:{local_rank}")
+        is_master = local_rank == 0
     else:
-        run_root_dir = "" # Placeholder for workers
+        device = torch.device(config.training.device)
+        is_master = True
+
+    # --- Checkpoint directory (master only to avoid race) ---
+    run_name = "debug"
+    checkpoint_dir = None
+    if is_master:
+        run_name = get_run_dir_name(config.checkpoint_dir, config.model)
+        run_name = run_name + "_binary_search"
+        if not config.debugging:
+            checkpoint_dir = os.path.join(config.checkpoint_dir, run_name)
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            print(f"Artifacts for this run will be saved in: {checkpoint_dir}")
+        else:
+            print("Debugging mode enabled: no checkpoint directory will be created.")
+
+    if is_distributed:
+        sync = [run_name, checkpoint_dir]
+        dist.broadcast_object_list(sync, src=0)
+        dist.barrier()
+        run_name, checkpoint_dir = sync[0], sync[1]
+
+    # --- Save config ---
+    legacy = config.to_legacy_dict()
+    legacy["model_params"]["class"] = model_class_name
+    if is_master and checkpoint_dir is not None:
+        config_path = os.path.join(checkpoint_dir, "config.json")
+        with open(config_path, "w") as f:
+            json.dump(legacy, f, indent=4)
+
+    # --- Loss function ---
+    if config.loss.name == "mse":
+        criterion = nn.MSELoss()
+    elif config.loss.name == "l1":
+        criterion = F.smooth_l1_loss
+    else:
+        raise ValueError(f"Unknown loss: {config.loss.name}")
 
     # --- Binary Search Parameters ---
-    low_log_sigma = -3.0
-    high_log_sigma = -1.0
-    epsilon = 0.1  # Stop when the interval is smaller than this
-    
+    low_log_sigma = -4.0
+    high_log_sigma = -0.5
+    epsilon = 0.1
+    tau = config.training.tau
+
     best_passing_sigma = None
 
     if is_master:
         print(f"--- Starting Binary Search ---")
-        print(f"Range: [{low_log_sigma}, {high_log_sigma}] | Target Precision: {epsilon}")
+        print(f"Range: [{low_log_sigma}, {high_log_sigma}] | Target Precision: {epsilon} | Tau: {tau}")
 
+    # Build initial model (schedule will be overridden each iteration)
+    _valid_model_params = inspect.signature(DiffusionModel.__init__).parameters
+    model_params = {k: v for k, v in legacy["model_params"].items() if k in _valid_model_params}
+    model = DiffusionModel(**model_params)
+    model.to(device)
+
+    if is_master:
+        print(f"Parameters: {count_parameters(model):,}")
+
+    prev_checkpoint_path = None
     iteration = 0
-    
+
     while (high_log_sigma - low_log_sigma) > epsilon:
         iteration += 1
-        
-        # Calculate Midpoint
         mid_log_sigma = (low_log_sigma + high_log_sigma) / 2
-        sigma_val_tensor = torch.tensor([10**mid_log_sigma], device=device)
-        
-        # Cleanup previous step
-        dist.barrier()
-        
+        sigma_val = torch.tensor([10 ** mid_log_sigma])
+
         if is_master:
             print(f"\n=== ITERATION {iteration} ===")
-            print(f"Testing Log Sigma: {mid_log_sigma:.4f} (Val: {sigma_val_tensor.item():.5f})")
+            print(f"Testing Log Sigma: {mid_log_sigma:.4f} (Val: {sigma_val.item():.5f})")
             print(f"Current Interval: [{low_log_sigma:.4f}, {high_log_sigma:.4f}]")
-            
-            # Sub-folder for this attempt
-            current_checkpoint_dir = os.path.join(run_root_dir, f"iter_{iteration}_sigma_{mid_log_sigma:.3f}")
-            os.makedirs(current_checkpoint_dir, exist_ok=True)
-            
-            wandb.init(
-                project=config['wandb_params']['project'],
-                entity=config['wandb_params']['entity'],
-                name=f"search_{run_number}_iter{iteration}",
-                group=f"binary_search_{run_number}",
-                config=config,
-                reinit=True
+
+        # Per-iteration checkpoint sub-folder
+        iter_checkpoint_dir = None
+        if is_master and checkpoint_dir is not None:
+            iter_checkpoint_dir = os.path.join(
+                checkpoint_dir, f"iter_{iteration}_sigma_{mid_log_sigma:.3f}"
             )
-        else:
-            current_checkpoint_dir = None
+            os.makedirs(iter_checkpoint_dir, exist_ok=True)
 
-        # --- Train Step ---
-        # 1. Clean Data Loaders
-        train_loader, val_loader, traj_loader = get_data_loaders(config['data_params'], is_distributed=True)
+        if is_distributed:
+            sync = [iter_checkpoint_dir]
+            dist.broadcast_object_list(sync, src=0)
+            iter_checkpoint_dir = sync[0]
 
-        # 2. Fresh Model
-        model = DiffusionModel(**config['model_params'])
-        model.to(device)
-        
-        # 3. Apply Schedule (Single Value)
-        model.compute_schedule_variables(sigmas=sigma_val_tensor)
-        
-        # 4. Wrap DDP
-        model = DDP(model, device_ids=[local_rank])
-        
-        # 5. Criterion
-        if config['loss_params']['name'] == 'mse':
-            criterion = nn.MSELoss()
-        else:
-            raise ValueError("Unknown loss")
+        # Load checkpoint from previous iteration into the bare model
+        raw_model = model.module if isinstance(model, DDP) else model
+        if prev_checkpoint_path is not None:
+            if is_master:
+                print(f"Loading checkpoint from previous iteration: {prev_checkpoint_path}")
+            state_dict = torch.load(prev_checkpoint_path, map_location=device)
+            raw_model.load_state_dict(state_dict)
 
-        # 6. Run Training & Get Boolean Result
-        # NOTE: Updates 'train_diffusion_single_noise_level' to return (model, success_bool)
-        _, success = train_diffusion_single_noise_level(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            traj_loader=traj_loader,
-            train_params=config['train_params'],
-            criterion=criterion,
-            all_configs=config,
-            checkpoint_dir=current_checkpoint_dir,
-            device=device,
-            is_master=is_master
+        # Reset schedule for this iteration
+        raw_model.compute_schedule_variables(sigmas=sigma_val.to(device))
+
+        # Wrap in DDP once (stays wrapped for subsequent iterations)
+        if is_distributed and not isinstance(model, DDP):
+            model = DDP(model, device_ids=[local_rank])
+
+        # W&B run for this iteration
+        if is_master:
+            wandb.init(
+                project=config.wandb.project + ("_sr" if config.data.super_resolution else ""),
+                entity=config.wandb.entity,
+                name=f"{run_name}_iter{iteration}",
+                group=run_name,
+                config={**legacy, "log_sigma": mid_log_sigma},
+                mode="disabled" if config.debugging else "online",
+                reinit=True,
+            )
+
+        # Build fresh data loaders for this iteration (same as train.py)
+        train_loader, val_loader, traj_loader = get_data_loaders(
+            config.data, is_distributed=is_distributed
         )
 
+        # Train
+        _, iter_success = train_diffusion_single_noise_level(
+            model,
+            train_loader,
+            val_loader,
+            traj_loader,
+            legacy["train_params"],
+            criterion,
+            legacy,
+            iter_checkpoint_dir,
+            device=device,
+            is_master=is_master,
+        )
+
+        # Save checkpoint for the next iteration
+        if is_master and iter_checkpoint_dir is not None:
+            prev_checkpoint_path = os.path.join(iter_checkpoint_dir, "iter_final.pth")
+            torch.save(raw_model.state_dict(), prev_checkpoint_path)
+            print(f"Saved iteration checkpoint: {prev_checkpoint_path}")
+
+        if is_distributed:
+            sync = [prev_checkpoint_path]
+            dist.broadcast_object_list(sync, src=0)
+            prev_checkpoint_path = sync[0]
+
+        # Evaluate success: own-prediction ratio vs. clean-prediction error
+        raw_model.eval()
+        evals = evaluate_dw_train_inf_gap(
+            {"model": raw_model},
+            val_loader,
+            n_batches=10,
+            metric="mse",
+            device=device,
+            input_types=["clean", "own-pred"],
+        )
+        clean_err = evals["mse_clean"]["model"].float().mean().to(device)
+        own_err = evals["mse_own_pred"]["model"].float().mean().to(device)
+
+        if is_distributed:
+            dist.all_reduce(clean_err, op=dist.ReduceOp.SUM)
+            dist.all_reduce(own_err, op=dist.ReduceOp.SUM)
+            clean_err = clean_err / dist.get_world_size()
+            own_err = own_err / dist.get_world_size()
+
+        ratio = own_err / (clean_err)
+        success = ratio.item() < tau
+
         if is_master:
+            print(f"Clean error: {clean_err.item()}")
+            print(f"Own error: {own_err.item()}")
+            print(f"Ratio: {ratio.item():.4f} (tau={tau}) -> {'PASSED' if success else 'FAILED'}")
+            wandb.log({
+                "iter": iteration,
+                "mid_log_sigma": mid_log_sigma,
+                "ratio": ratio.item(),
+                "success": int(success),
+            })
             wandb.finish()
 
-        # --- Binary Search Update ---
-        # Logic: 
-        # If Success (True) -> This sigma works. We want the SMALLEST working one.
-        #                      So we try lower. Set high = mid. Record as best so far.
-        # If Failure (False)-> This sigma is too small (too hard). We need larger.
-        #                      Set low = mid.
-        
+        # Binary search update
         if success:
-            if is_master: print(f"Result: PASSED. Searching lower interval...")
+            if is_master:
+                print("Result: PASSED. Searching lower interval...")
             best_passing_sigma = mid_log_sigma
             high_log_sigma = mid_log_sigma
         else:
-            if is_master: print(f"Result: FAILED. Searching higher interval...")
+            if is_master:
+                print("Result: FAILED. Searching higher interval...")
             low_log_sigma = mid_log_sigma
 
     # --- Final Result ---
     if is_master:
-        print("\n" + "="*40)
+        print("\n" + "=" * 40)
         print("BINARY SEARCH COMPLETE")
-        print("="*40)
+        print("=" * 40)
         if best_passing_sigma is not None:
             print(f"Smallest viable Log Sigma: {best_passing_sigma:.5f}")
-            print(f"Value: {10**best_passing_sigma:.5f}")
+            print(f"Value: {10 ** best_passing_sigma:.5f}")
         else:
             print("No viable sigma found in the range (all failed).")
-            
-    cleanup()
 
-if __name__ == '__main__':
+    if is_distributed:
+        cleanup()
+
+
+if __name__ == "__main__":
     main()

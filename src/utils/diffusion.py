@@ -2,20 +2,26 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
-### OBTAIN BETAS FROM SNR
+### CONVERSION HELPERS
+
+def sigmas_from_betas(betas):
+    """Convert a beta schedule to sigmas (noise levels = sqrt(1 - alphas_cumprod))."""
+    alphas = 1.0 - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+    return torch.sqrt(1.0 - alphas_cumprod)
 
 def betas_from_sqrtOneMinusAlphasCumprod(sqrtOneMinusAlphasCumprod: torch.Tensor) -> torch.Tensor:
     """
     Given sqrtOneMinusAlphasCumprod (shape [T] or [T, 1, 1, 1]), reconstructs a stable betas schedule.
     """
-    # Flatten
-    sqrtOneMinusAlphasCumprod = sqrtOneMinusAlphasCumprod.flatten().float()
+    # Flatten — use float64 to avoid precision loss when squaring small values
+    sqrtOneMinusAlphasCumprod = sqrtOneMinusAlphasCumprod.flatten().double()
 
     # 1. Compute alphas_cumprod
     alphas_cumprod = 1.0 - sqrtOneMinusAlphasCumprod ** 2  # shape [T]
 
     # Numerical safety
-    alphas_cumprod = torch.clamp(alphas_cumprod, min=1e-8, max=1.0)
+    alphas_cumprod = torch.clamp(alphas_cumprod, min=1e-15, max=1.0)
 
     # 2. Compute alphas from ratio
     alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
@@ -28,7 +34,7 @@ def betas_from_sqrtOneMinusAlphasCumprod(sqrtOneMinusAlphasCumprod: torch.Tensor
     # 4. Clamp betas for stability
     betas = torch.clamp(betas, min=1e-8, max=0.999999)
 
-    return betas
+    return betas.float()
 
 
 ### BETA SCHEDULES
@@ -90,8 +96,7 @@ def cosine_sigma_schedule(sigma_min, sigma_max, T):
 
 def low_nl_max_out_beta_schedule(timesteps, min_log_nl):
     noise_levels = torch.linspace(10**min_log_nl, 10**(-0.0001), timesteps)
-    betas = betas_from_sqrtOneMinusAlphasCumprod(noise_levels)
-    return betas
+    return noise_levels
 
 def low_and_high_nl_focus(timesteps, min_log_nl):
     start_log = min_log_nl
@@ -105,8 +110,7 @@ def low_and_high_nl_focus(timesteps, min_log_nl):
     p3 = torch.linspace(0.95, 10**-0.0001, n_high)
 
     noise_levels = torch.cat((p1, p2, p3))
-    betas = betas_from_sqrtOneMinusAlphasCumprod(noise_levels)
-    return betas
+    return noise_levels
 
 def initial_exploration_beta_schedule(min_log_value, timesteps):
     start = 10**min_log_value
@@ -114,8 +118,7 @@ def initial_exploration_beta_schedule(min_log_value, timesteps):
 
     power = 0.5
     noise_levels = torch.linspace(start**power, end**power, timesteps)**(1/power)
-    betas = betas_from_sqrtOneMinusAlphasCumprod(noise_levels)
-    return betas
+    return noise_levels
 
 def compute_sigmas_refiner(sigma_min, refinementSteps):
     K = refinementSteps
@@ -137,7 +140,7 @@ def predict_start_from_noise(x_t, t, predictedNoise, diff_model):
 def compute_estimate(model, k, cond, gt):
 
     interm_estimates = []
-    
+
     dNoisy = model.sqrtAlphasCumprod[k] * gt + model.sqrtOneMinusAlphasCumprod[k] * torch.randn_like(gt).to('cuda')
 
     for i in reversed(range(0, k+1, 1)):
@@ -147,17 +150,16 @@ def compute_estimate(model, k, cond, gt):
 
         predictedNoiseCond = model.unet(dNoiseCond, t)
 
-        # use model (noise predictor) to predict mean
-        modelMean = model.sqrtRecipAlphas[t] * (dNoiseCond - model.betas[t] * predictedNoiseCond / model.sqrtOneMinusAlphasCumprod[t])
-        dNoisy = modelMean[:, cond.shape[1]:]
+        # Predict x0 from noise prediction
+        x0_estimate = (dNoiseCond[:, cond.shape[1]:] - model.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, cond.shape[1]:]) / model.sqrtAlphasCumprod[t]
 
-        if i != 0:
-        
-            dNoisy = dNoisy + model.sqrtPosteriorVariance[t] * torch.randn_like(dNoisy)
+        if i > 0:
+            # Re-noise to t-1
+            dNoisy = model.sqrtAlphasCumprod[t-1] * x0_estimate + model.sqrtOneMinusAlphasCumprod[t-1] * torch.randn_like(x0_estimate)
+        else:
+            dNoisy = x0_estimate
 
-        estimate = (dNoiseCond[:, cond.shape[1]:]  - model.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, cond.shape[1]:])/model.sqrtAlphasCumprod[t]
-
-        interm_estimates.append(estimate)
+        interm_estimates.append(x0_estimate)
 
     return dNoisy
 

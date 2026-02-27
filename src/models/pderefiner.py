@@ -90,7 +90,8 @@ class PDERefiner(nn.Module):
         self.trainingTimesteps = torch.cat((torch.zeros(10), self.timesteps))
         
     def forward(self, conditioning: torch.Tensor, data: torch.Tensor = None,
-                return_x0_estimate: bool = False, input_type: str = "ancestor") -> torch.Tensor:
+                return_x0_estimate: bool = False, input_type: str = "ancestor",
+                return_noise_pred: bool = False) -> torch.Tensor:
 
         device = conditioning.device
 
@@ -137,18 +138,25 @@ class PDERefiner(nn.Module):
             if return_x0_estimate:
                 all_x0_estimates = []
 
+            if return_noise_pred:
+                predictions = []
+                targets = []
+
             for i in reversed(range(self.nTimesteps)):
                 t = torch.full((cond.shape[0],), i, device=device, dtype=torch.long)
 
                 if i == self.nTimesteps - 1:
-                    # Cold start at max timestep: all modes share this behaviour
+                    # Cold start at max timestep: all modes share this   
                     dNoisy = torch.zeros_like(d)
+                    if return_noise_pred:
+                        targets.append(d)
 
                 else:
                     # Optional: pre-processing of dNoisy based on input_type
                     if input_type == "clean":
                         # Re-noise reference d at the current sigma level
-                        dNoisy = d + self.sigmas[t] * torch.randn_like(d)
+                        dNoise = torch.randn_like(d)
+                        dNoisy = d + self.sigmas[t] * dNoise
 
                     elif input_type == "prev-pred":
                         # Look one step ahead (higher sigma = more noisy)
@@ -180,15 +188,23 @@ class PDERefiner(nn.Module):
                         predicted_tmp = self.unet(input_cat_tmp, t)[:, cond.shape[1]:]
                         x0_tmp = dNoisy - self.sigmas[t] * predicted_tmp
                         # 3. Re-noise the preliminary x0 at the current level
-                        dNoisy = x0_tmp + self.sigmas[t] * torch.randn_like(d)
+                        dNoise = torch.randn_like(d)
+                        dNoisy = x0_tmp + self.sigmas[t] * dNoise
 
                     else:  # "ancestor" (default)
                         # Re-noise the previous x0 estimate at noise level t
-                        dNoisy = x0_estimate + self.sigmas[t] * torch.randn_like(d)
+                        dNoise = torch.randn_like(d)
+                        dNoisy = x0_estimate + self.sigmas[t] * dNoise
+                    
+                    if return_noise_pred:
+                        targets.append(dNoise)
 
                 # --- Standard refinement step ---
                 input_cat = torch.cat((cond, dNoisy), dim=1)
                 predicted = self.unet(input_cat, t)[:, cond.shape[1]:]
+
+                if return_noise_pred:
+                    predictions.append(predicted)
 
                 if i == self.nTimesteps - 1:
                     # At max timestep the model outputs x0 directly
@@ -202,4 +218,6 @@ class PDERefiner(nn.Module):
 
             if return_x0_estimate:
                 return x0_estimate, torch.stack(all_x0_estimates)
+            if return_noise_pred:
+                return x0_estimate, targets, predictions
             return x0_estimate

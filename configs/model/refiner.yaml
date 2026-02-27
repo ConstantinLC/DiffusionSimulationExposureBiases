@@ -1,5 +1,5 @@
 # @package model
-class: PDERefiner
+type: PDERefiner
 
 refinementSteps: 3
 log_sigma_min: -1.5

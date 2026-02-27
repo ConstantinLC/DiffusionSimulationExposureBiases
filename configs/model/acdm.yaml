@@ -1,5 +1,5 @@
 # @package model
-class: DiffusionModel
+type: DiffusionModel
 
 dimension: 2
 diffSchedule: linear

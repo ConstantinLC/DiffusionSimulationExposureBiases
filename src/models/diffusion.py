@@ -2,12 +2,10 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
 from ..utils.diffusion import linear_beta_schedule, quadratic_beta_schedule, sigmoid_beta_schedule
 from ..utils.diffusion import cosine_beta_schedule, cubic_beta_schedule, initial_exploration_beta_schedule
 from ..utils.diffusion import psd_beta_schedule, cosine_sigma_schedule
-from ..utils.diffusion import betas_from_sqrtOneMinusAlphasCumprod
+from ..utils.diffusion import sigmas_from_betas
 from ..utils.diffusion import prep
 from .unet_2d import Unet
 from .unet_acdm import UnetACDM
@@ -34,31 +32,28 @@ class DiffusionModel(nn.Module):
         self.architecture = architecture
         
         if diffSchedule == "linear":
-            betas = linear_beta_schedule(timesteps=self.timesteps)
+            sigmas = sigmas_from_betas(linear_beta_schedule(timesteps=self.timesteps))
         elif diffSchedule == "quadratic":
-            betas = quadratic_beta_schedule(timesteps=self.timesteps)
+            sigmas = sigmas_from_betas(quadratic_beta_schedule(timesteps=self.timesteps))
         elif diffSchedule == "sigmoid":
-            betas = sigmoid_beta_schedule(timesteps=self.timesteps)
+            sigmas = sigmas_from_betas(sigmoid_beta_schedule(timesteps=self.timesteps))
         elif diffSchedule == "cosine":
-            betas = cosine_beta_schedule(timesteps=self.timesteps)
+            sigmas = sigmas_from_betas(cosine_beta_schedule(timesteps=self.timesteps))
         elif diffSchedule == "cubic":
-            betas = cubic_beta_schedule(timesteps=self.timesteps)
+            sigmas = sigmas_from_betas(cubic_beta_schedule(timesteps=self.timesteps))
         elif diffSchedule == "psd":
-            betas = psd_beta_schedule(timesteps=self.timesteps)
+            sigmas = sigmas_from_betas(psd_beta_schedule(timesteps=self.timesteps))
             self.timesteps=100
         elif diffSchedule == "inverseCosLog-1.875":
             sigmas = cosine_sigma_schedule(10**-1.875, 10**-0.0001, 20)
-            training_sigmas = sigmas
-            #training_sigmas = torch.concatenate((torch.ones(80)*sigmas[0], sigmas))
-            betas = betas_from_sqrtOneMinusAlphasCumprod(training_sigmas)
             self.timesteps=100
         elif diffSchedule == "inverseCosLog-1.5":
             sigmas = cosine_sigma_schedule(10**-1.5, 10**-0.0001, self.timesteps)
-            training_sigmas = sigmas
-            #training_sigmas = torch.concatenate((torch.ones(80)*sigmas[0], sigmas))
-            betas = betas_from_sqrtOneMinusAlphasCumprod(training_sigmas)
         elif diffSchedule == "initial_exploration":
-            betas = initial_exploration_beta_schedule(min_log_value=-2.5, timesteps=self.timesteps)
+            sigmas = initial_exploration_beta_schedule(min_log_value=-2.5, timesteps=self.timesteps)
+        elif "single" in diffSchedule:
+            log_sigma = diffSchedule.split("_")[1]
+            sigmas = torch.tensor([float(log_sigma)])
         else:
             raise ValueError("Unknown variance schedule")
         
@@ -104,46 +99,24 @@ class DiffusionModel(nn.Module):
             if not 'sigmas' in checkpoint_unet.keys():
                 checkpoint_unet['sigmas'] = torch.tensor([1])
             self.unet.load_state_dict(checkpoint_unet)
-            if load_betas and 'betas' in ckpt: 
-                betas = ckpt['betas']
+            if load_betas and 'betas' in ckpt:
+                sigmas = sigmas_from_betas(ckpt['betas'].ravel())
 
-        self.compute_schedule_variables(betas)
+        self.compute_schedule_variables(sigmas=sigmas)
 
-    def compute_schedule_variables(self, betas=None, sigmas=None):
-        if betas is None and sigmas is None:
-            raise Exception
-        elif sigmas is not None:
-            betas = betas_from_sqrtOneMinusAlphasCumprod(sigmas)
-        
-        # 1. Flatten to 1D for calculation
-        betas = betas.ravel()
-        alphas = 1.0 - betas
-        alphasCumprod = torch.cumprod(alphas, axis=0)
-        
-        # Pad with 1.0 at the beginning for t=0 anterior value
-        alphasCumprodPrev = F.pad(alphasCumprod[:-1], (1, 0), value=1.0)
-        
-        sqrtRecipAlphas = torch.sqrt(1.0 / alphas)
-        sqrtAlphasCumprod = torch.sqrt(alphasCumprod)
-        sqrtOneMinusAlphasCumprod = torch.sqrt(1. - alphasCumprod)
-        
-        posteriorVariance = betas * (1. - alphasCumprodPrev) / (1. - alphasCumprod)
-        sqrtPosteriorVariance = torch.sqrt(posteriorVariance)
+    def compute_schedule_variables(self, sigmas):
+        """Accept sigmas (noise levels = sqrt(1 - alphas_cumprod)) and register buffers."""
+        sigmas = sigmas.ravel().float()
 
-        # 2. Determine Broadcasting Shape
-        # If 1D data (Batch, Channel, Length) -> params need (T, 1, 1)
-        # If 2D data (Batch, Channel, Height, Width) -> params need (T, 1, 1, 1)
+        sqrtOneMinusAlphasCumprod = sigmas
+        sqrtAlphasCumprod = torch.sqrt(1.0 - sigmas ** 2)
 
-        # 3. Register buffers with correct broadcasting shape
-        self.register_buffer("betas", prep(betas, self.dimension)) 
-        self.register_buffer("sqrtRecipAlphas", prep(sqrtRecipAlphas, self.dimension))
+        # Register buffers with correct broadcasting shape
         self.register_buffer("sqrtAlphasCumprod", prep(sqrtAlphasCumprod, self.dimension))
         self.register_buffer("sqrtOneMinusAlphasCumprod", prep(sqrtOneMinusAlphasCumprod, self.dimension))
-        self.register_buffer("sqrtPosteriorVariance", prep(sqrtPosteriorVariance, self.dimension))
-
-        sigmas = (sqrtAlphasCumprod / sqrtOneMinusAlphasCumprod)
-        self.unet.sigmas = sigmas
-        self.timesteps = len(betas)
+        print(self.sqrtOneMinusAlphasCumprod)
+        self.unet.sigmas = sqrtAlphasCumprod / sqrtOneMinusAlphasCumprod
+        self.timesteps = len(sigmas)
 
     def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False, 
                 input_type:str = "ancestor", lower_timestep_limit:int = 0) -> torch.Tensor:
@@ -168,7 +141,6 @@ class DiffusionModel(nn.Module):
         # ==========================
         if self.training:
             t = torch.randint(0, self.timesteps, (d.shape[0],), device=device).long()
-
             dNoise = torch.randn_like(d)
             dNoisy = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
             noise = torch.cat((cond, dNoise), dim=1)

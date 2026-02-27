@@ -1,0 +1,13 @@
+# @package model
+type: DiffusionModel
+
+diffSchedule: initial_exploration
+diffSteps: 1
+inferenceSamplingMode: ddpm
+inferenceConditioningIntegration: clean
+diffCondIntegration: clean
+checkpoint: ""
+
+model:
+  checkpoint: /mnt/SSD2/constantin/diffusion-multisteps/checkpoints/KuramotoSivashinsky/superres/run_12/best_model.pth
+  load_betas: false

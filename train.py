@@ -8,7 +8,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from src.config import ExperimentConfig
+from src.config import ExperimentConfig, DiffusionModelConfig, RefinerConfig, Unet2DConfig, Unet1DConfig
 from src.data.loaders import get_data_loaders
 from src.models.diffusion import DiffusionModel
 from src.models.pderefiner import PDERefiner
@@ -20,11 +20,11 @@ from src.utils.general import count_parameters, get_run_dir_name
 from src.utils.multigpu import setup_ddp, cleanup
 
 
-def build_model(model_class_name: str, model_cfg: dict, config: ExperimentConfig) -> nn.Module:
-    """Instantiate the correct model class from the name specified in the config."""
+def build_model(config: ExperimentConfig) -> nn.Module:
+    """Instantiate the correct model class from the typed model config."""
     mp = config.model
 
-    if model_class_name == "DiffusionModel":
+    if isinstance(mp, DiffusionModelConfig):
         return DiffusionModel(
             dimension=mp.dimension,
             dataSize=mp.dataSize,
@@ -41,20 +41,20 @@ def build_model(model_class_name: str, model_cfg: dict, config: ExperimentConfig
             load_betas=mp.load_betas,
         )
 
-    elif model_class_name == "PDERefiner":
+    elif isinstance(mp, RefinerConfig):
         return PDERefiner(
             dimension=mp.dimension,
             dataSize=mp.dataSize,
             condChannels=mp.condChannels,
             dataChannels=mp.dataChannels,
-            refinementSteps=model_cfg.get("refinementSteps", 3),
-            log_sigma_min=model_cfg.get("log_sigma_min", -1.5),
+            refinementSteps=mp.refinementSteps,
+            log_sigma_min=mp.log_sigma_min,
             padding_mode=mp.padding_mode,
-            architecture=model_cfg.get("architecture", "Unet2D"),
+            architecture=mp.architecture,
             checkpoint=mp.checkpoint,
         )
 
-    elif model_class_name == "Unet2D":
+    elif isinstance(mp, Unet2DConfig):
         return Unet(
             dim=mp.dim if mp.dim is not None else mp.dataSize[0],
             sigmas=torch.zeros(1),
@@ -66,7 +66,7 @@ def build_model(model_class_name: str, model_cfg: dict, config: ExperimentConfig
             with_time_emb=mp.with_time_emb,
         )
 
-    elif model_class_name == "Unet1D":
+    elif isinstance(mp, Unet1DConfig):
         return Unet1D(
             dim=mp.dim if mp.dim is not None else mp.dataSize[0],
             sigmas=torch.tensor(1),
@@ -79,8 +79,7 @@ def build_model(model_class_name: str, model_cfg: dict, config: ExperimentConfig
         )
 
     else:
-        valid = ["DiffusionModel", "PDERefiner", "Unet2D", "Unet1D"]
-        raise ValueError(f"Unknown model class '{model_class_name}'. Valid options: {valid}")
+        raise ValueError(f"Unknown model config type: {type(mp)}")
 
 
 def _make_criterion(config: ExperimentConfig):
@@ -96,11 +95,16 @@ def _make_criterion(config: ExperimentConfig):
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
-    # --- Read model class from raw Hydra config before Pydantic conversion ---
-    model_cfg_raw = OmegaConf.to_container(cfg.model, resolve=True)
-    model_class_name = model_cfg_raw.get("class", "DiffusionModel")
-
+    # Select training params from pretraining/finetuning based on checkpoint presence
+    has_checkpoint = bool(OmegaConf.select(cfg, "model.checkpoint", default=""))
+    training_source = cfg.finetuning if has_checkpoint else cfg.pretraining
+    mode = "finetuning" if has_checkpoint else "pretraining"
+    print(f"Using {mode} training parameters.")
+    cfg = OmegaConf.merge(cfg, {"training": OmegaConf.to_container(training_source, resolve=True)})
+    
     config = ExperimentConfig.from_hydra(cfg)
+    model_type = config.model.type
+    print(config)
 
     # --- DDP setup (activated by torchrun) ---
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -118,7 +122,7 @@ def main(cfg: DictConfig) -> None:
     run_name = "debug"
     checkpoint_dir = None
     if is_master:
-        run_name = get_run_dir_name(config.checkpoint_dir, model_class_name, model_cfg_raw)
+        run_name = get_run_dir_name(config.checkpoint_dir, config.model)
         if not config.debugging:
             checkpoint_dir = os.path.join(config.checkpoint_dir, run_name)
             os.makedirs(checkpoint_dir, exist_ok=True)
@@ -134,7 +138,6 @@ def main(cfg: DictConfig) -> None:
 
     # --- Save config (master only, skipped in debug mode) ---
     legacy = config.to_legacy_dict()
-    legacy["model_params"]["class"] = model_class_name
     if is_master and checkpoint_dir is not None:
         config_path = os.path.join(checkpoint_dir, "config.json")
         with open(config_path, "w") as f:
@@ -158,25 +161,23 @@ def main(cfg: DictConfig) -> None:
     )
 
     # --- Build and move model ---
-    model = build_model(model_class_name, model_cfg_raw, config)
+    model = build_model(config)
     model.to(device)
 
     if is_master:
-        print(f"Model class  : {model_class_name}")
+        print(f"Model class  : {model_type}")
         print(f"Parameters   : {count_parameters(model):,}")
 
     if is_distributed:
-        print('a')
         model = DDP(model, device_ids=[local_rank])
-        print('b')
 
     # --- Loss function ---
     criterion = _make_criterion(config)
 
     # --- Route to the appropriate trainer ---
     prediction_steps = config.data.prediction_steps
-    is_diffusion_like = model_class_name in ("DiffusionModel", "PDERefiner")
-    is_unet = model_class_name in ("Unet2D", "Unet1D")
+    is_diffusion_like = isinstance(config.model, (DiffusionModelConfig, RefinerConfig))
+    is_unet = isinstance(config.model, (Unet2DConfig, Unet1DConfig))
 
     if config.data.super_resolution and prediction_steps > 1:
         raise ValueError(
@@ -199,7 +200,7 @@ def main(cfg: DictConfig) -> None:
                 is_master=is_master,
             )
         else:
-            if model_class_name == "PDERefiner":
+            if isinstance(config.model, RefinerConfig):
                 raise NotImplementedError(
                     "Multi-step training for PDERefiner is not yet implemented. "
                     "Use prediction_steps=1 or add a dedicated refiner multistep trainer."
@@ -244,7 +245,7 @@ def main(cfg: DictConfig) -> None:
             )
 
     else:
-        raise ValueError(f"No trainer registered for model class '{model_class_name}'")
+        raise ValueError(f"No trainer registered for model config type '{type(config.model)}'")
 
     if is_master:
         wandb.finish()

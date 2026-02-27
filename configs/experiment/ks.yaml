@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - override /dataset: ks
+
+checkpoint_dir: ./checkpoints/KuramotoSivashinsky/forecasting/
+
+data:
+  prediction_steps: 1

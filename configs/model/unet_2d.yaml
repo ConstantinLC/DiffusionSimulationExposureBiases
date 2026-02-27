@@ -1,5 +1,5 @@
 # @package model
-class: Unet2D
+type: Unet2D
 
 dim: 64
 dim_mults: [1, 1, 1]

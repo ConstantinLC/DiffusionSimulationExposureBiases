@@ -3,7 +3,7 @@ import torch.optim as optim
 import wandb
 import os
 from ..utils.general import traj_eval_step
-from ..utils.diffusion import compute_estimate, betas_from_sqrtOneMinusAlphasCumprod
+from ..utils.diffusion import compute_estimate, compute_sigmas_refiner
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import json
 import collections
@@ -56,19 +56,33 @@ def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_pa
             train_loader.sampler.set_epoch(epoch)
 
         # --- Training Loop ---
-        model.train()
+        if not train_params["end_to_end"]:
+            model.train()
+        else:
+            model.eval()
+
+        
+
         running_train_loss = 0.0
         
         for batch_idx, sample in enumerate(train_loader):
+
             data = sample["data"].to(device)
             conditioning_frame = data[:, 0]
             target_frame = data[:, 1]
             
             optimizer.zero_grad()
+            if not train_params["end_to_end"]:
+                # Diffusion specific forward pass
+                noise, predicted_noise = model(conditioning_frame, target_frame)
+                loss = criterion(predicted_noise, noise)
             
-            # Diffusion specific forward pass
-            noise, predicted_noise = model(conditioning_frame, target_frame)
-            loss = criterion(predicted_noise, noise)
+            else:
+                _, noises, predicted_noises  = model(conditioning_frame, target_frame,
+                                                    return_noise_pred = True,
+                                                    input_type="own-pred")
+                loss = criterion(torch.concatenate(noises), torch.concatenate(predicted_noises))
+
             
             loss.backward()
             optimizer.step()
@@ -95,8 +109,16 @@ def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_pa
                     target_frame_val = data_val[:, 1]
 
                     # Diffusion specific validation pass
-                    noise, predicted_noise = model(conditioning_frame_val, target_frame_val)
-                    loss_val = criterion(predicted_noise, noise)
+                    if not train_params["end_to_end"]:
+                        # Diffusion specific forward pass
+                        noise, predicted_noise = model(conditioning_frame_val, target_frame_val)
+                        loss_val = criterion(predicted_noise, noise)
+                    else:
+                        _, noises, predicted_noises  = model(conditioning_frame_val, target_frame_val,
+                                                    return_noise_pred = True,
+                                                    input_type="own-pred")
+                        loss_val = criterion(torch.concatenate(noises), torch.concatenate(predicted_noises))
+                        
                     running_val_loss += loss_val.item()
             model.train()
 
