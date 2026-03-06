@@ -135,6 +135,10 @@ def main(cfg: DictConfig) -> None:
 
         # Load checkpoint from previous iteration into the bare model
         raw_model = model.module if isinstance(model, DDP) else model
+            
+        # Test without using checkpoint first
+        prev_checkpoint_path = None
+
         if prev_checkpoint_path is not None:
             if is_master:
                 print(f"Loading checkpoint from previous iteration: {prev_checkpoint_path}")
@@ -209,7 +213,7 @@ def main(cfg: DictConfig) -> None:
             clean_err = clean_err / dist.get_world_size()
             own_err = own_err / dist.get_world_size()
 
-        ratio = own_err / (clean_err)
+        ratio = own_err / clean_err
         success = ratio.item() < tau
 
         if is_master:

@@ -11,7 +11,7 @@ data:
   frames_per_time_step: 1
   limit_trajectories_train: 819
   limit_trajectories_val: 102
-  batch_size: 32
+  batch_size: 16
   val_batch_size: 16
 
 model:

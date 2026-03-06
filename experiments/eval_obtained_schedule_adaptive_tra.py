@@ -15,7 +15,6 @@ sys.path.append('/mnt/SSD2/constantin/diffusion-multisteps')
 from src.dataset import TurbulenceDataset
 from src.data_transformations import DataParams, Transforms
 from src.model_diffusion import DiffusionModel
-from src.diffusion_utils import betas_from_sqrtOneMinusAlphasCumprod
 
 def evaluate_dw_train_inf_gap(models, val_loader, device):
     """
@@ -182,10 +181,7 @@ def main():
         # C. Overwrite Schedule with Loaded Params
         if noise_levels_tensor is not None:
             print(f"  > Overwriting schedule with {steps} steps from json.")
-            # Convert noise levels (sqrt(1-alpha_cumprod)) to betas
-            new_betas = betas_from_sqrtOneMinusAlphasCumprod(noise_levels_tensor)
-            
-            model.compute_schedule_variables(new_betas)
+            model.compute_schedule_variables(sigmas=noise_levels_tensor)
 
         # D. Load Weights
         checkpoint = torch.load(ckpt_path, map_location=args.device)

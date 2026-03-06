@@ -139,6 +139,6 @@ class ExperimentConfig(BaseModel):
                 "trajectory_sequence_length": self.data.trajectory_sequence_length,
             },
             "loss_params": self.loss.dict(),
-            "model_params": self.model.dict(),
+            "model_params": self.model.dict(exclude={"type"}),
             "wandb_params": self.wandb.dict(),
         }

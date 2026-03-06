@@ -18,8 +18,13 @@ from src.models.pderefiner import PDERefiner
 # ─────────────────────────── model factory ───────────────────────────────────
 
 def build_model(model_cfg: dict) -> torch.nn.Module:
-    cls = model_cfg.get('class', 'DiffusionModel')
-
+    cls = model_cfg.get('type', None)
+    if cls is None:
+        if 'refinementSteps' in model_cfg:
+            cls = 'PDERefiner'
+        else:
+            cls = 'DiffusionModel'
+    print(cls)
     if cls == 'DiffusionModel':
         return DiffusionModel(
             dimension=model_cfg['dimension'],
@@ -45,6 +50,7 @@ def build_model(model_cfg: dict) -> torch.nn.Module:
             log_sigma_min=model_cfg.get('log_sigma_min', -1.5),
             padding_mode=model_cfg.get('padding_mode', 'circular'),
             architecture=model_cfg.get('architecture', 'Unet2D'),
+            multi_unet=model_cfg.get('multi_unet', False),
         )
 
     else:
@@ -53,7 +59,7 @@ def build_model(model_cfg: dict) -> torch.nn.Module:
 
 # ─────────────────────────── noise-level helper ──────────────────────────────
 
-def get_noise_levels(model):
+def get_noise_levels(model): 
     """Return (noise_levels_list, x_axis_label) in inference order (high → low)."""
     if isinstance(model, DiffusionModel):
         levels = model.sqrtOneMinusAlphasCumprod.ravel().cpu().tolist()[::-1]

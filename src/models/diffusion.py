@@ -46,6 +46,7 @@ class DiffusionModel(nn.Module):
             self.timesteps=100
         elif diffSchedule == "inverseCosLog-1.875":
             sigmas = cosine_sigma_schedule(10**-1.875, 10**-0.0001, 20)
+            sigmas = torch.concatenate((torch.ones(80)*sigmas[0], sigmas))
             self.timesteps=100
         elif diffSchedule == "inverseCosLog-1.5":
             sigmas = cosine_sigma_schedule(10**-1.5, 10**-0.0001, self.timesteps)
@@ -53,7 +54,7 @@ class DiffusionModel(nn.Module):
             sigmas = initial_exploration_beta_schedule(min_log_value=-2.5, timesteps=self.timesteps)
         elif "single" in diffSchedule:
             log_sigma = diffSchedule.split("_")[1]
-            sigmas = torch.tensor([float(log_sigma)])
+            sigmas = torch.tensor([10 ** float(log_sigma)])
         else:
             raise ValueError("Unknown variance schedule")
         

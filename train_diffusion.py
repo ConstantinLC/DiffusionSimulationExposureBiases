@@ -7,9 +7,10 @@ from torch.nn import functional as F
 import hydra
 from omegaconf import DictConfig
 
-from src.config import ExperimentConfig
+from src.config import ExperimentConfig, DiffusionModelConfig, RefinerConfig
 from src.data.loaders import get_data_loaders
 from src.models.diffusion import DiffusionModel
+from src.models.pderefiner import PDERefiner
 from src.training.diffusion_trainer import train_diffusion_model, train_diffusion_model_multisteps
 from src.utils.general import count_parameters, get_next_run_number
 from src.utils.diffusion import betas_from_sqrtOneMinusAlphasCumprod
@@ -44,7 +45,12 @@ def main(cfg: DictConfig) -> None:
 
     # --- Initialize model and data ---
     train_loader, val_loader, traj_loader = get_data_loaders(config.data)
-    model = DiffusionModel(**legacy['model_params'])
+    if isinstance(config.model, DiffusionModelConfig):
+        model = DiffusionModel(**legacy['model_params'])
+    elif isinstance(config.model, RefinerConfig):
+        model = PDERefiner(**legacy['model_params'])
+    else:
+        raise ValueError(f"Unsupported model type: {type(config.model)}")
     model.to(device)
 
     print(f"Model has {count_parameters(model)} parameters.")

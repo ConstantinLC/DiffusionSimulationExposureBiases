@@ -1,0 +1,20 @@
+# @package _global_
+defaults:
+  - override /dataset: ks
+  - override /model: unet_1d
+
+checkpoint_dir: ./checkpoints/KuramotoSivashinsky/unet/
+
+data:
+  prediction_steps: 1
+
+pretraining:
+  num_epochs: 501
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-6
+  T_max: 501
+  device: cuda
+  epoch_sampling_frequency: 50
+
+wandb:
+  project: KuramotoSivashinsky-unet
