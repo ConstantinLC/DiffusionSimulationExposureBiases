@@ -1,31 +1,125 @@
 import torch
 import torch.optim as optim
+import numpy as np
 import wandb
 import os
 from ..utils.general import traj_eval_step
-from ..utils.diffusion import compute_estimate, compute_sigmas_refiner
+from ..utils.diffusion import compute_estimate, compute_sigmas_refiner, evaluate_dw_train_inf_gap
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import json
 import collections
 from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-import os
-import torch
 
-def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_params, criterion, all_configs, checkpoint_dir, device, is_master):
+TAU_THRESHOLDS = [1.0, 1.05, 1.1, 1.15]
+
+
+def update_error_tracking_map(error_tracking_map, model, val_loader, device, epoch,
+                              tau_thresholds=None, n_batches=20, validate_every_k=10):
+    """
+    For each noise level sigma and each tau threshold, record the first epoch
+    where the mean per-sample ratio mean(E_own_i / E_clean_i) drops below tau,
+    storing the mean E_clean at that point as gamma(sigma, tau).
+    """
+    if tau_thresholds is None:
+        tau_thresholds = TAU_THRESHOLDS
+
+    if epoch % validate_every_k != 0:
+        return error_tracking_map
+
+    model.eval()
+
+    if hasattr(model, 'sqrtOneMinusAlphasCumprod'):
+        sigmas = model.sqrtOneMinusAlphasCumprod.squeeze().cpu().flip(0)
+    else:
+        sigmas = torch.linspace(1, 0, model.timesteps)
+    T = len(sigmas)
+
+    # Accumulate per-sample values across batches: lists of length T
+    all_clean = [[] for _ in range(T)]
+    all_ratio = [[] for _ in range(T)]
+
+    spatial_dims = None
+
+    with torch.no_grad():
+        for batch_idx, sample in enumerate(val_loader):
+            if batch_idx >= n_batches:
+                break
+
+            data   = sample['data'].to(device)
+            cond   = data[:, 0]
+            target = data[:, 1]
+
+            if spatial_dims is None:
+                spatial_dims = tuple(range(1, target.ndim))
+
+            _, ests_clean = model(conditioning=cond, data=target,
+                                  return_x0_estimate=True, input_type='clean')
+            _, ests_own   = model(conditioning=cond, data=target,
+                                  return_x0_estimate=True, input_type='own-pred')
+
+            for t_idx, (est_clean, est_own) in enumerate(zip(ests_clean, ests_own)):
+                clean_mse_i = (est_clean - target).pow(2).mean(dim=spatial_dims)
+                own_mse_i   = (est_own   - target).pow(2).mean(dim=spatial_dims)
+
+                valid = clean_mse_i > 0
+                ratio_i = (own_mse_i / clean_mse_i.clamp(min=1e-12))[valid]
+                clean_i = clean_mse_i[valid]
+
+                all_clean[t_idx].append(clean_i.cpu())
+                all_ratio[t_idx].append(ratio_i.cpu())
+
+    # Compute median over all accumulated samples, then check thresholds
+    for t_idx in range(T):
+        if not all_clean[t_idx]:
+            continue
+
+        clean_all = torch.cat(all_clean[t_idx])
+        ratio_all = torch.cat(all_ratio[t_idx])
+
+        mean_ratio = ratio_all.mean().item()
+        mean_clean = clean_all.mean().item()
+
+        sigma_str = str(sigmas[t_idx].item())
+
+        for tau in tau_thresholds:
+            tau_str = str(tau)
+            if tau - 0.01 < mean_ratio < tau + 0.01:
+                if sigma_str not in error_tracking_map:
+                    error_tracking_map[sigma_str] = {}
+                if tau_str not in error_tracking_map[sigma_str]:
+                    error_tracking_map[sigma_str][tau_str] = {
+                        'clean_error': mean_clean,
+                        'ratio':       mean_ratio,
+                        'epoch':       epoch,
+                    }
+                break  # only record the smallest unrecorded threshold per epoch
+
+    return error_tracking_map
+
+def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_params, criterion, all_configs, checkpoint_dir, device, is_master, track_instability=False):
     """
     Trains a diffusion model with Cosine Annealing Learning Rate and DDP support.
+
+    Args:
+        track_instability: if True, compute per-noise-level own-prediction bias
+            at each validation epoch and save an error_tracking_map.json to
+            checkpoint_dir.  This is used to produce Figure 2 (instability
+            thresholds) in the paper.
     """
     epoch_sampling_frequency = train_params["epoch_sampling_frequency"]
-    
+
     # --- Config extraction ---
     num_epochs = train_params["num_epochs"]
     lr_start = train_params["learning_rate_start"]
     lr_end = train_params["learning_rate_end"]
-    
+
     # Note: Model is already moved to device and wrapped in DDP in main.py.
     # We use the passed 'device' for data transfers.
+
+    # --- Error tracking map for instability threshold validation ---
+    error_tracking_map = {}
 
     # --- 1. Optimizer & Scheduler Setup ---
     optimizer = optim.Adam(model.parameters(), lr=lr_start)
@@ -153,6 +247,16 @@ def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_pa
             checkpoint_dir,
             is_master=is_master,
         )
+
+        # --- Instability Threshold Tracking ---
+        # Run every epoch (independent of traj eval frequency) to get dense coverage.
+        if track_instability:
+            error_tracking_map = update_error_tracking_map(
+                error_tracking_map, model_to_eval, val_loader, device, epoch + 1
+            )
+            if is_master and checkpoint_dir is not None:
+                with open(os.path.join(checkpoint_dir, "error_tracking_map.json"), "w") as f:
+                    json.dump(error_tracking_map, f, indent=4)
 
         # --- Logging (Master Only) ---
         if is_master:

@@ -1,0 +1,32 @@
+# @package _global_
+# Train a diffusion model on the greedy schedule obtained from Phase 2 (greedy schedule construction).
+# The schedule is loaded from a JSON file produced by train_greedy_schedule.py.
+#
+# Usage:
+#   python train.py +experiment=ks_greedy
+#   python train.py +experiment=ks_greedy model.schedule_path=/path/to/schedule.json
+defaults:
+  - override /dataset: ks
+  - override /model: acdm
+
+checkpoint_dir: ./checkpoints/KuramotoSivashinsky/greedy
+
+model:
+  diffSchedule: from_file
+  schedule_path: ./checkpoints/KuramotoSivashinsky/exploration/run_4/greedy_schedule/schedule.json
+
+pretraining:
+  num_epochs: 1001
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-6
+  T_max: 1001
+  device: cuda
+  epoch_sampling_frequency: 50
+
+finetuning:
+  num_epochs: 1001
+  learning_rate_start: 1.0e-5
+  learning_rate_end: 1.0e-7
+  T_max: 1001
+  device: cuda
+  epoch_sampling_frequency: 50

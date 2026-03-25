@@ -1,0 +1,36 @@
+# @package _global_
+# Phase 1: Exploration for Kolmogorov Flow
+# Trains on a dense log-uniform schedule, progressively removing noise levels
+# as they satisfy B_own(sigma) <= tau. Saves a per-level checkpoint for each
+# solved sigma so Phase 2 (greedy schedule construction) can reuse them.
+#
+# Usage:
+#   python train_exploration.py +experiment=kolmo_exploration
+defaults:
+  - override /dataset: kolmogorov
+  - override /model: diffusion
+
+checkpoint_dir: ./checkpoints/KolmogorovFlow/exploration
+
+data:
+  prediction_steps: 1
+  batch_size: 64
+  val_batch_size: 256
+
+model:
+  diffSchedule: linear
+  diffSteps: 40
+
+training:
+  device: cuda
+  num_epochs: 1500   # max_passes * epochs_per_pass (not used directly, satisfies schema)
+  T_max: 1500
+  tau: 1.05
+  log_sigma_min: -3.0
+  log_sigma_max: -0.0001
+  n_exploration_levels: 40
+  epochs_per_pass: 50
+  max_passes: 30
+  n_eval_batches: 30
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-6

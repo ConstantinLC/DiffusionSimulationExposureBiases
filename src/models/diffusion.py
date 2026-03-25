@@ -14,11 +14,12 @@ from .unet_1d import Unet1D
 ### DIFFUSION MODEL WITH CONDITIONING
 class DiffusionModel(nn.Module):
 
-    def __init__(self, dimension, dataSize, condChannels, dataChannels, diffSchedule, diffSteps, 
+    def __init__(self, dimension, dataSize, condChannels, dataChannels, diffSchedule, diffSteps,
                  inferenceSamplingMode, inferenceConditioningIntegration, diffCondIntegration,
                  inferenceInitialSampling = "random", padding_mode='circular',
-                architecture="ours", checkpoint="", load_betas=False):
+                architecture="ours", checkpoint="", load_betas=False, schedule_path=None):
         super(DiffusionModel, self).__init__()
+        import json
 
         self.dimension = dimension
 
@@ -55,41 +56,49 @@ class DiffusionModel(nn.Module):
         elif "single" in diffSchedule:
             log_sigma = diffSchedule.split("_")[1]
             sigmas = torch.tensor([10 ** float(log_sigma)])
+        elif diffSchedule == "from_file":
+            if schedule_path is None:
+                raise ValueError("diffSchedule='from_file' requires schedule_path to be set")
+            with open(schedule_path) as f:
+                sched_data = json.load(f)
+            sigmas = torch.tensor(sched_data["schedule"], dtype=torch.float32)
+            print(f"Loaded greedy schedule ({len(sigmas)} steps) from {schedule_path}")
         else:
             raise ValueError("Unknown variance schedule")
         
         self.condChannels = condChannels
         self.dataChannels = dataChannels
-        '''if self.architecture == "ACDM":
-            self.unet = UnetACDM(dim=128,
-                channels= condChannels+dataChannels,
+
+        if self.architecture == "ACDM":
+            self.unet = UnetACDM(
+                dim=dataSize[0],
                 sigmas=torch.zeros(1),
+                channels=condChannels+dataChannels,
                 dim_mults=(1,1,1),
                 use_convnext=True,
-                convnext_mult=1)'''
-        
-        if self.dimension == 2:
-            self.unet = Unet(
-            dim=dataSize[0],
-            sigmas=torch.zeros(1),
-            channels=condChannels+dataChannels,
-            dim_mults=(1,1,1),
-            use_convnext=True,
-            convnext_mult=1,
-            padding_mode=padding_mode,
+                convnext_mult=1,
             )
-
+        elif self.dimension == 2:
+            self.unet = Unet(
+                dim=dataSize[0],
+                sigmas=torch.zeros(1),
+                channels=condChannels+dataChannels,
+                dim_mults=(1,1,1),
+                use_convnext=True,
+                convnext_mult=1,
+                padding_mode=padding_mode,
+            )
         elif self.dimension == 1:
             self.unet = Unet1D(
-            dim=dataSize[0],
-            sigmas=torch.zeros(1),
-            channels=condChannels+dataChannels,
-            dim_mults=(1,1,1),
-            convnext_mult=1,
-            padding_mode=padding_mode
+                dim=dataSize[0],
+                sigmas=torch.zeros(1),
+                channels=condChannels+dataChannels,
+                dim_mults=(1,1,1),
+                convnext_mult=1,
+                padding_mode=padding_mode,
             )
-        
-        else : raise Exception
+        else:
+            raise ValueError(f"Unsupported dimension: {self.dimension}")
         
         if checkpoint != "":
             print(f"Loading Checkpoint from {checkpoint}")
@@ -119,11 +128,11 @@ class DiffusionModel(nn.Module):
         self.unet.sigmas = sqrtAlphasCumprod / sqrtOneMinusAlphasCumprod
         self.timesteps = len(sigmas)
 
-    def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False, 
-                input_type:str = "ancestor", lower_timestep_limit:int = 0) -> torch.Tensor:
+    def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False,
+                input_type:str = "ancestor", lower_timestep_limit:int = 0, start_step:int = None) -> torch.Tensor:
 
         device = conditioning.device
-        
+
         # Initialize data if None (Training target or Inference starting point)
         if data is None:
             if self.dimension == 1:
@@ -162,21 +171,28 @@ class DiffusionModel(nn.Module):
         # ==========================
         
         else:
-            # Setup initial noise
+            # Determine starting step (shortcut: start from intermediate noise level)
+            effective_start = (self.timesteps - 1) if start_step is None else start_step
+
+            # Setup initial noise at the starting noise level
             if self.inferenceInitialSampling == "random":
-                dNoise = torch.randn_like(d)
-                cNoise = torch.randn_like(cond) # Used if needed for specialized integration
+                eps = torch.randn_like(d)
+                cNoise = torch.randn_like(cond)  # Used if needed for specialized integration
             else:
                 # Expand dims for scalar broadcasting if using fixed noise
                 expand_dims = [-1] * (d.ndim - 1)
-                dNoise = torch.randn((1,) + d.shape[1:], device=device).expand(d.shape[0], *expand_dims)
+                eps = torch.randn((1,) + d.shape[1:], device=device).expand(d.shape[0], *expand_dims)
                 cNoise = torch.randn((1,) + cond.shape[1:], device=device).expand(cond.shape[0], *expand_dims)
+
+            # Initialize at the correct noise level for effective_start
+            sigma_start = self.sqrtOneMinusAlphasCumprod.ravel()[effective_start]
+            dNoise = sigma_start * eps
 
             sampleStride = 1
             if return_x0_estimate:
                 all_x0_estimates = []
 
-            for i in reversed(range(0, self.timesteps, sampleStride)):
+            for i in reversed(range(0, effective_start + 1, sampleStride)):
                 t = torch.full((cond.shape[0],), i, device=device, dtype=torch.long)
                 condNoisy = cond
 
@@ -233,5 +249,5 @@ class DiffusionModel(nn.Module):
                     all_x0_estimates.append(x0_current)
 
             if return_x0_estimate:
-                return dNoise, torch.stack(all_x0_estimates)
+                return dNoise, torch.flip(torch.stack(all_x0_estimates), [0])
             return dNoise

@@ -16,10 +16,11 @@ data:
 
 model:
   dimension: 2
-  dataSize: [128, 64]
+  dataSize: [64, 64] #[128, 64]
   condChannels: 5
   dataChannels: 5
-  padding_mode: same
+  padding_mode: zeros
+  architecture: ACDM
 
 pretraining:
   num_epochs: 1001

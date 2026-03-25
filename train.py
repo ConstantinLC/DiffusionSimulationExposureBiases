@@ -8,12 +8,15 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from src.config import ExperimentConfig, DiffusionModelConfig, RefinerConfig, Unet2DConfig, Unet1DConfig
+from src.config import ExperimentConfig, DiffusionModelConfig, RefinerConfig, Unet2DConfig, Unet1DConfig, DilResNetConfig, FNOConfig
 from src.data.loaders import get_data_loaders
 from src.models.diffusion import DiffusionModel
 from src.models.pderefiner import PDERefiner
 from src.models.unet_2d import Unet
 from src.models.unet_1d import Unet1D
+from src.models.unet_acdm import UnetACDM
+from src.models.dilresnet import DilatedResNet
+from src.models.fno import FNO
 from src.training.diffusion_trainer import train_diffusion_model, train_diffusion_model_multisteps
 from src.training.unet_trainer import train_unet, train_unet_multisteps
 from src.utils.general import count_parameters, get_run_dir_name
@@ -39,6 +42,7 @@ def build_model(config: ExperimentConfig) -> nn.Module:
             architecture=mp.architecture,
             checkpoint=mp.checkpoint,
             load_betas=mp.load_betas,
+            schedule_path=mp.schedule_path,
         )
 
     elif isinstance(mp, RefinerConfig):
@@ -55,6 +59,15 @@ def build_model(config: ExperimentConfig) -> nn.Module:
         )
 
     elif isinstance(mp, Unet2DConfig):
+        if mp.architecture == "ACDM":
+            return UnetACDM(
+                dim=mp.dim if mp.dim is not None else mp.dataSize[0],
+                sigmas=torch.zeros(1),
+                channels=mp.condChannels,
+                dim_mults=tuple(mp.dim_mults),
+                use_convnext=True,
+                convnext_mult=mp.convnext_mult,
+            )
         return Unet(
             dim=mp.dim if mp.dim is not None else mp.dataSize[0],
             sigmas=torch.zeros(1),
@@ -76,6 +89,24 @@ def build_model(config: ExperimentConfig) -> nn.Module:
             convnext_mult=mp.convnext_mult,
             padding_mode=mp.padding_mode,
             with_time_emb=mp.with_time_emb,
+        )
+
+    elif isinstance(mp, DilResNetConfig):
+        return DilatedResNet(
+            condChannels=mp.condChannels,
+            dataChannels=mp.dataChannels,
+            blocks=mp.blocks,
+            features=mp.features,
+            dilate=mp.dilate,
+        )
+
+    elif isinstance(mp, FNOConfig):
+        return FNO(
+            condChannels=mp.condChannels,
+            dataChannels=mp.dataChannels,
+            modes=mp.modes,
+            hidden_channels=mp.hidden_channels,
+            n_layers=mp.n_layers,
         )
 
     else:
@@ -155,6 +186,13 @@ def main(cfg: DictConfig) -> None:
             mode="disabled" if config.debugging else "online",
         )
 
+    # Sync all ranks after master-only init (wandb.init can be slow on network).
+    # Without this barrier, rank 1 can race ahead to DDP() and deadlock waiting
+    # for rank 0's broadcast while rank 0 is still initialising wandb.
+    if is_distributed:
+        import torch.distributed as dist
+        dist.barrier()
+
     # --- Data loaders ---
     train_loader, val_loader, traj_loader = get_data_loaders(
         config.data, is_distributed=is_distributed
@@ -177,7 +215,7 @@ def main(cfg: DictConfig) -> None:
     # --- Route to the appropriate trainer ---
     prediction_steps = config.data.prediction_steps
     is_diffusion_like = isinstance(config.model, (DiffusionModelConfig, RefinerConfig))
-    is_unet = isinstance(config.model, (Unet2DConfig, Unet1DConfig))
+    is_unet = isinstance(config.model, (Unet2DConfig, Unet1DConfig, DilResNetConfig, FNOConfig))
 
     if config.data.super_resolution and prediction_steps > 1:
         raise ValueError(
@@ -198,6 +236,7 @@ def main(cfg: DictConfig) -> None:
                 checkpoint_dir,
                 device=device,
                 is_master=is_master,
+                track_instability=config.training.track_instability,
             )
         else:
             if isinstance(config.model, RefinerConfig):

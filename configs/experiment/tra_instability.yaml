@@ -1,0 +1,29 @@
+# @package _global_
+# Instability threshold experiment for Transonic Flow (Figure 2)
+defaults:
+  - override /dataset: transonic
+  - override /model: diffusion
+
+checkpoint_dir: ./checkpoints/TransonicFlow/instability_threshold
+
+data:
+  prediction_steps: 1
+  batch_size: 64
+  val_batch_size: 512
+
+model:
+  dimension: 2
+  dataSize: [64, 64]
+  condChannels: 5
+  dataChannels: 5
+  diffSchedule: linear
+  diffSteps: 20
+  padding_mode: zeros
+
+pretraining:
+  num_epochs: 101
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-4
+  T_max: 101
+  epoch_sampling_frequency: 50
+  track_instability: true

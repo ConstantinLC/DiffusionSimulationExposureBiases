@@ -23,6 +23,7 @@ training:
   binary_search_steps: 0
   finetuning_steps: 0
   perform_binary_search: false
+  track_instability: false
   best_log_sigma: null
   channels_per_frame: null
   first_ar_step_noising_step_limit: null

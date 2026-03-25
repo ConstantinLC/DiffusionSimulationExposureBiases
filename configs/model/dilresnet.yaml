@@ -1,0 +1,7 @@
+# @package model
+type: DilResNet
+
+blocks: 4
+features: 48
+dilate: true
+padding_mode: circular

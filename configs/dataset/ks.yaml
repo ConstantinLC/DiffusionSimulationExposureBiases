@@ -30,10 +30,10 @@ pretraining:
   epoch_sampling_frequency: 50
 
 finetuning:
-  num_epochs: 101
+  num_epochs: 1001
   learning_rate_start: 1.0e-4
   learning_rate_end: 1.0e-6
-  T_max: 101
+  T_max: 1001
   device: cuda
   epoch_sampling_frequency: 50
 

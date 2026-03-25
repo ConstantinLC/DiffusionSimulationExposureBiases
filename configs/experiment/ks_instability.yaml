@@ -1,0 +1,29 @@
+# @package _global_
+# Instability threshold experiment for Kuramoto-Sivashinsky (Figure 2)
+defaults:
+  - override /dataset: ks
+  - override /model: diffusion
+
+checkpoint_dir: ./checkpoints/KuramotoSivashinsky/instability_threshold
+
+data:
+  prediction_steps: 1
+  batch_size: 64
+  val_batch_size: 512
+
+model:
+  dimension: 1
+  dataSize: [64]
+  condChannels: 1
+  dataChannels: 1
+  diffSchedule: linear
+  diffSteps: 20
+  padding_mode: circular
+
+pretraining:
+  num_epochs: 100
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-4
+  T_max: 100
+  epoch_sampling_frequency: 50
+  track_instability: true

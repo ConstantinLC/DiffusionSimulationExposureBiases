@@ -233,7 +233,7 @@ class UnetACDM(nn.Module):
         else:
             block_klass = partial(ResnetBlock, groups=resnet_block_groups)
         
-        self.sigmas = torch.ravel(sigmas).to('cuda')
+        self.register_buffer('sigmas', torch.ravel(sigmas))
 
         # time embeddings
         if with_time_emb:
@@ -297,7 +297,7 @@ class UnetACDM(nn.Module):
     def forward(self, x, time):
         x = self.init_conv(x)
 
-        noise_levels = torch.log(self.sigmas[time])
+        noise_levels = torch.log(self.sigmas[time.to(self.sigmas.device)])
 
         t = self.time_mlp(noise_levels) if self.time_mlp is not None else None
         #freq = self.multifreq_mlp(freq_band) if self.multifreq_mlp is not None else None

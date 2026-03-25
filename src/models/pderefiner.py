@@ -48,7 +48,18 @@ class PDERefiner(nn.Module):
 
         # ── Create Unet(s) ─────────────────────────────────────────────────────
         def _make_unet():
-            if dimension == 2:
+            if architecture == "ACDM":
+                if dimension != 2:
+                    raise ValueError("ACDM architecture is only supported for dimension=2")
+                return UnetACDM(
+                    dim=dataSize[0],
+                    sigmas=torch.zeros(1),
+                    channels=condChannels + dataChannels,
+                    dim_mults=(1, 1, 1),
+                    use_convnext=True,
+                    convnext_mult=1,
+                )
+            elif dimension == 2:
                 return Unet(
                     dim=dataSize[0],
                     sigmas=torch.zeros(1),
@@ -71,7 +82,6 @@ class PDERefiner(nn.Module):
                 raise ValueError(f"Unsupported dimension: {dimension}")
 
         if multi_unet:
-            print('a')
             self.unets = nn.ModuleList([_make_unet() for _ in range(self.nTimesteps)])
         else:
             self.unet = _make_unet()

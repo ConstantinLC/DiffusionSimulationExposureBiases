@@ -1,0 +1,26 @@
+# @package _global_
+# Instability threshold experiment for Kolmogorov Flow (Figure 2)
+# Trains a diffusion model with linear schedule (20 steps) and tracks
+# per-noise-level own-prediction bias to validate Hypothesis 3.1.
+defaults:
+  - override /dataset: kolmogorov
+  - override /model: diffusion
+
+checkpoint_dir: ./checkpoints/KolmogorovFlow/instability_threshold
+
+data:
+  prediction_steps: 1
+  batch_size: 64
+  val_batch_size: 512
+
+model:
+  diffSchedule: linear
+  diffSteps: 20
+
+pretraining:
+  num_epochs: 101
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-4
+  T_max: 101
+  epoch_sampling_frequency: 50
+  track_instability: true

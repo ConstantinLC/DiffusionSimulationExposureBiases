@@ -20,6 +20,7 @@ class TrainingConfig(BaseModel):
     channels_per_frame: Optional[int] = None
     first_ar_step_noising_step_limit: Optional[int] = None
     end_to_end: bool = False
+    track_instability: bool = False
 
 
 class DataConfig(BaseModel):
@@ -58,6 +59,7 @@ class _NeuralBase(BaseModel):
     dataChannels: int
     padding_mode: str = "circular"
     checkpoint: str = ""
+    architecture: str = "Unet2D"
 
     class Config:
         extra = "ignore"  # tolerate unknown YAML keys (e.g. nested legacy blocks)
@@ -70,15 +72,14 @@ class DiffusionModelConfig(_NeuralBase):
     inferenceSamplingMode: str = "ddpm"
     inferenceConditioningIntegration: str = "clean"
     diffCondIntegration: str = "clean"
-    architecture: str = "Unet2D"
     load_betas: bool = False
+    schedule_path: Optional[str] = None  # path to greedy schedule JSON (used when diffSchedule="from_file")
 
 
 class RefinerConfig(_NeuralBase):
     type: Literal["PDERefiner"] = "PDERefiner"
     refinementSteps: int = 3
     log_sigma_min: float = -1.5
-    architecture: str = "Unet2D"
 
 
 class _UnetBase(_NeuralBase):
@@ -96,7 +97,21 @@ class Unet1DConfig(_UnetBase):
     type: Literal["Unet1D"] = "Unet1D"
 
 
-ModelConfig = Union[DiffusionModelConfig, RefinerConfig, Unet2DConfig, Unet1DConfig]
+class DilResNetConfig(_NeuralBase):
+    type: Literal["DilResNet"] = "DilResNet"
+    blocks: int = 4
+    features: int = 48
+    dilate: bool = True
+
+
+class FNOConfig(_NeuralBase):
+    type: Literal["FNO"] = "FNO"
+    modes: list[int] = [16, 16]
+    hidden_channels: int = 64
+    n_layers: int = 4
+
+
+ModelConfig = Union[DiffusionModelConfig, RefinerConfig, Unet2DConfig, Unet1DConfig, DilResNetConfig, FNOConfig]
 
 
 # ---------------------------------------------------------------------------

@@ -6,4 +6,6 @@ __all__ = [
     "PDERefiner",
     "Unet1D",
     "UnetACDM",
+    "DilatedResNet",
+    "FNO",
 ]
