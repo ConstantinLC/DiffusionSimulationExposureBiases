@@ -28,9 +28,9 @@ training:
   tau: 1.05
   log_sigma_min: -3.0
   log_sigma_max: -0.0001
-  n_exploration_levels: 40
-  epochs_per_pass: 50
-  max_passes: 30
+  n_exploration_levels: 100
+  epochs_per_pass: 1000
+  max_passes: 5
   n_eval_batches: 30
   learning_rate_start: 1.0e-4
   learning_rate_end: 1.0e-6

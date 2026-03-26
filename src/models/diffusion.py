@@ -17,7 +17,8 @@ class DiffusionModel(nn.Module):
     def __init__(self, dimension, dataSize, condChannels, dataChannels, diffSchedule, diffSteps,
                  inferenceSamplingMode, inferenceConditioningIntegration, diffCondIntegration,
                  inferenceInitialSampling = "random", padding_mode='circular',
-                architecture="ours", checkpoint="", load_betas=False, schedule_path=None):
+                architecture="ours", checkpoint="", load_betas=False, schedule_path=None,
+                level_weights=None):
         super(DiffusionModel, self).__init__()
         import json
 
@@ -63,6 +64,10 @@ class DiffusionModel(nn.Module):
                 sched_data = json.load(f)
             sigmas = torch.tensor(sched_data["schedule"], dtype=torch.float32)
             print(f"Loaded greedy schedule ({len(sigmas)} steps) from {schedule_path}")
+            # Load per-level weights from the schedule file if not provided explicitly
+            if level_weights is None and "level_weights" in sched_data:
+                level_weights = sched_data["level_weights"]
+                print(f"Loaded level_weights from schedule file")
         else:
             raise ValueError("Unknown variance schedule")
         
@@ -112,9 +117,9 @@ class DiffusionModel(nn.Module):
             if load_betas and 'betas' in ckpt:
                 sigmas = sigmas_from_betas(ckpt['betas'].ravel())
 
-        self.compute_schedule_variables(sigmas=sigmas)
+        self.compute_schedule_variables(sigmas=sigmas, level_weights=level_weights)
 
-    def compute_schedule_variables(self, sigmas):
+    def compute_schedule_variables(self, sigmas, level_weights=None):
         """Accept sigmas (noise levels = sqrt(1 - alphas_cumprod)) and register buffers."""
         sigmas = sigmas.ravel().float()
 
@@ -127,6 +132,17 @@ class DiffusionModel(nn.Module):
         print(self.sqrtOneMinusAlphasCumprod)
         self.unet.sigmas = sqrtAlphasCumprod / sqrtOneMinusAlphasCumprod
         self.timesteps = len(sigmas)
+
+        # Per-level sampling weights (normalized to sum to 1)
+        T = len(sigmas)
+        if level_weights is not None:
+            w = torch.tensor(level_weights, dtype=torch.float32)
+            if len(w) != T:
+                raise ValueError(f"level_weights length {len(w)} must match number of sigmas {T}")
+            w = w / w.sum()
+        else:
+            w = torch.ones(T, dtype=torch.float32) / T
+        self.register_buffer("level_weights", w)
 
     def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False,
                 input_type:str = "ancestor", lower_timestep_limit:int = 0, start_step:int = None) -> torch.Tensor:
@@ -150,7 +166,7 @@ class DiffusionModel(nn.Module):
         # TRAINING
         # ==========================
         if self.training:
-            t = torch.randint(0, self.timesteps, (d.shape[0],), device=device).long()
+            t = torch.multinomial(self.level_weights.to(device), d.shape[0], replacement=True).long()
             dNoise = torch.randn_like(d)
             dNoisy = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
             noise = torch.cat((cond, dNoise), dim=1)

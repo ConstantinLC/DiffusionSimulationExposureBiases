@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 # B_own evaluation
 # ---------------------------------------------------------------------------
 
-def compute_b_own(model, val_loader, device, n_batches=10000):
+def compute_b_own(model, val_loader, device, n_batches=30):
     """
     Compute B_own(sigma_t) = mean_i [ E_own_i / E_clean_i ] for every noise
     level currently active in the model's schedule.
@@ -65,7 +65,6 @@ def compute_b_own(model, val_loader, device, n_batches=10000):
 
     with torch.no_grad():
         for batch_idx, sample in enumerate(val_loader):
-            print(batch_idx)
             if batch_idx >= n_batches:
                 break
 

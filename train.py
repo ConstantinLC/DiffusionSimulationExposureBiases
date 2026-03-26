@@ -43,6 +43,7 @@ def build_model(config: ExperimentConfig) -> nn.Module:
             checkpoint=mp.checkpoint,
             load_betas=mp.load_betas,
             schedule_path=mp.schedule_path,
+            level_weights=mp.level_weights,
         )
 
     elif isinstance(mp, RefinerConfig):
