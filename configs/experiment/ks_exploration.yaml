@@ -23,8 +23,8 @@ model:
 
 training:
   device: cuda
-  num_epochs: 1500   # max_passes * epochs_per_pass (not used directly, satisfies schema)
-  T_max: 1500
+  num_epochs: 1000   # max_passes * epochs_per_pass (not used directly, satisfies schema)
+  T_max: 1000
   tau: 1.05
   log_sigma_min: -3.0
   log_sigma_max: -0.0001

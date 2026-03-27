@@ -120,6 +120,76 @@ def initial_exploration_beta_schedule(min_log_value, timesteps):
     noise_levels = torch.linspace(start**power, end**power, timesteps)**(1/power)
     return noise_levels
 
+def schedule_low_noise_heavy(sigma_min, sigma_max, T, power=3):
+    """
+    Schedule 1: Dense at LOW noise levels.
+
+    Uses a power-law mapping s -> s^power with power > 1, so most of the T steps
+    are clustered near sigma_min.  The model overtrained at low sigma and undertrained
+    at high sigma.  During inference the large clean-input errors at high sigma
+    accumulate and propagate to the end of the reverse chain, causing REB >> 1 at
+    LOW noise levels (end of sampling / left side of Fig. 1).
+
+    Args:
+        sigma_min: minimum noise level (end of sampling)
+        sigma_max: maximum noise level (start of sampling)
+        T:         number of diffusion steps
+        power:     controls how strongly steps pile up near sigma_min (default 3)
+
+    Returns:
+        Tensor of T sigma values sorted from sigma_min to sigma_max.
+    """
+    s = torch.linspace(0.0, 1.0, T)
+    return sigma_min + (sigma_max - sigma_min) * s ** power
+
+
+def schedule_log_linear(sigma_min, sigma_max, T):
+    """
+    Schedule 2: Log-linear (geometric) spacing — balanced coverage.
+
+    Steps are uniformly distributed in log-sigma space, giving each decade of
+    noise the same number of steps.  No noise level is strongly over- or under-
+    sampled, so the reconstruction error reduction rate stays compatible with the
+    model capacity across the whole chain.  Result: low REB throughout sampling.
+
+    Args:
+        sigma_min: minimum noise level (end of sampling)
+        sigma_max: maximum noise level (start of sampling)
+        T:         number of diffusion steps
+
+    Returns:
+        Tensor of T sigma values sorted from sigma_min to sigma_max.
+    """
+    log_min = torch.log(torch.tensor(sigma_min))
+    log_max = torch.log(torch.tensor(sigma_max))
+    return torch.exp(torch.linspace(log_min, log_max, T))
+
+
+def schedule_high_noise_heavy(sigma_min, sigma_max, T, power=3):
+    """
+    Schedule 3: Too dense at HIGH noise levels.
+
+    Uses a power-law mapping s -> s^(1/power) with power > 1, so most of the T
+    steps are clustered near sigma_max.  Even though the per-step own-prediction
+    bias is small (the model is well-trained at high sigma), the sheer number of
+    fine steps at high sigma causes errors to compound quickly at the BEGINNING
+    of the reverse chain, giving REB >> 1 at HIGH noise levels (start of sampling /
+    right side of Fig. 1).  The handful of steps left at low sigma are also
+    undertrained, reinforcing the bias there.
+
+    Args:
+        sigma_min: minimum noise level (end of sampling)
+        sigma_max: maximum noise level (start of sampling)
+        T:         number of diffusion steps
+        power:     controls how strongly steps pile up near sigma_max (default 3)
+
+    Returns:
+        Tensor of T sigma values sorted from sigma_min to sigma_max.
+    """
+    s = torch.linspace(0.0, 1.0, T)
+    return sigma_min + (sigma_max - sigma_min) * s ** (1.0 / power)
+
+
 def compute_sigmas_refiner(sigma_min, refinementSteps):
     K = refinementSteps
     return torch.flip(torch.tensor([sigma_min**(k/K) for k in range(1, K+1)]), dims=[0])
