@@ -248,6 +248,22 @@ class DiffusionModel(nn.Module):
                     # 3. Re-noise to current t (refresh noise)
                     dNoise = self.sqrtAlphasCumprod[t] * x0_estimate + self.sqrtOneMinusAlphasCumprod[t] * torch.randn_like(d)
 
+                elif "own-pred" in input_type:    
+                    n_own_preds = int(input_type.split('_')[-1])
+                    # 1. Forward diffusion to current t
+                    xO_estimate = d
+                    for k in range(n_own_preds):
+                        print(k)
+                        dNoise = self.sqrtAlphasCumprod[t] * xO_estimate + self.sqrtOneMinusAlphasCumprod[t] * torch.randn_like(d)
+                    
+                        # 2. Predict x0 using current t
+                        dNoiseCond = torch.cat((condNoisy, dNoise), dim=1)
+                        predictedNoiseCond = self.unet(dNoiseCond, t)
+                        x0_estimate = (dNoiseCond[:, cond.shape[1]:] - self.sqrtOneMinusAlphasCumprod[t] * predictedNoiseCond[:, cond.shape[1]:]) / self.sqrtAlphasCumprod[t]
+                        
+                    # 3. Re-noise to current t (refresh noise)
+                    dNoise = self.sqrtAlphasCumprod[t] * x0_estimate + self.sqrtOneMinusAlphasCumprod[t] * torch.randn_like(d)
+
                 # --- Standard Reverse Step ---
                 dNoiseCond = torch.cat((condNoisy, dNoise), dim=1)
                 predictedNoiseCond = self.unet(dNoiseCond, t)

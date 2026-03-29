@@ -200,7 +200,7 @@ def evaluate_dw_bias(model, val_loader, device):
     """
     model.eval()
     n_steps = model.timesteps if isinstance(model, DiffusionModel) else model.nTimesteps
-    sum_mse = {k: np.zeros(n_steps) for k in ("ancestor", "clean", "own_pred")}
+    sum_mse = {k: np.zeros(n_steps) for k in ("ancestor", "clean", "own_pred", "own_pred_5")}
     n_batches = 0
 
     # PDERefiner returns estimates in inference order (high → low sigma, index 0 = highest)
@@ -220,16 +220,20 @@ def evaluate_dw_bias(model, val_loader, device):
                                 return_x0_estimate=True, input_type="clean")
             _, x0_own_pred = model(conditioning=conditioning_frame, data=target_frame,
                                    return_x0_estimate=True, input_type="own-pred")
+            _, x0_own_pred_5 = model(conditioning=conditioning_frame, data=target_frame,
+                                   return_x0_estimate=True, input_type="own-pred_5")
 
             if needs_flip:
                 x0_ancestor = torch.flip(x0_ancestor, [0])
                 x0_clean = torch.flip(x0_clean, [0])
                 x0_own_pred = torch.flip(x0_own_pred, [0])
+                x0_own_pred_5 = torch.flip(x0_own_pred_5, [0])
 
             for t in range(n_steps):
                 sum_mse["ancestor"][t]  += torch.mean((x0_ancestor[t]  - target_frame) ** 2).item()
                 sum_mse["clean"][t]     += torch.mean((x0_clean[t]     - target_frame) ** 2).item()
                 sum_mse["own_pred"][t]  += torch.mean((x0_own_pred[t]  - target_frame) ** 2).item()
+                sum_mse["own_pred_5"][t]  += torch.mean((x0_own_pred_5[t]  - target_frame) ** 2).item()
             n_batches += 1
 
     print(f"  DW bias evaluated over {n_batches} batches")
@@ -237,6 +241,7 @@ def evaluate_dw_bias(model, val_loader, device):
         "mse_ancestor":       (sum_mse["ancestor"]  / n_batches).tolist(),
         "mse_clean":          (sum_mse["clean"]      / n_batches).tolist(),
         "mse_clean_own_pred": (sum_mse["own_pred"]   / n_batches).tolist(),
+        "mse_clean_own_pred_5": (sum_mse["own_pred_5"]   / n_batches).tolist(),
     }
 
 
@@ -262,6 +267,8 @@ def plot_dw_bias(results, noise_levels, name, output_dir):
                  label="Inference input (Ancestor)", color='red', linestyle='solid', linewidth=2)
     axes[1].plot(noise_levels, results["mse_clean_own_pred"],
                  label="Inference input (Own Pred)", color='green', linestyle='dashdot', linewidth=2)
+    axes[1].plot(noise_levels, results["mse_clean_own_pred_5"],
+                 label="Inference input (Own Pred 5 steps)", color='green', linestyle='dashdot', linewidth=2)
 
     axes[1].set_yscale('log')
     axes[1].set_xscale('log')
@@ -275,6 +282,7 @@ def plot_dw_bias(results, noise_levels, name, output_dir):
         f"  Clean:    {results['mse_clean'][0]:.2e}\n"
         f"  Ancestor: {results['mse_ancestor'][0]:.2e}\n"
         f"  Own-Pred: {results['mse_clean_own_pred'][0]:.2e}"
+        f"  Own-Pred-5Steps: {results['mse_clean_own_pred_5'][0]:.2e}"
     )
     axes[1].text(0.05, 0.95, summary, transform=axes[1].transAxes,
                  fontsize=9, verticalalignment='top',
@@ -466,13 +474,18 @@ def main():
             "mse_ancestor": bias_results["mse_ancestor"],
             "mse_clean": bias_results["mse_clean"],
             "mse_clean_own_pred": bias_results["mse_clean_own_pred"],
+            "mse_clean_own_pred_5": bias_results["mse_clean_own_pred_5"],
             "final_mse_ancestor": bias_results["mse_ancestor"][0],
             "final_mse_clean": bias_results["mse_clean"][0],
             "final_mse_clean_own_pred": bias_results["mse_clean_own_pred"][0],
+            "final_mse_clean_own_pred_5": bias_results["mse_clean_own_pred_5"][0],
+            "sum_errors": np.sum(np.array(bias_results["mse_clean"]) - np.array(bias_results["mse_clean_own_pred"]))
         }
         print(f"    final mse_ancestor:  {bias_results['mse_ancestor'][0]:.4e}")
         print(f"    final mse_clean:     {bias_results['mse_clean'][0]:.4e}")
         print(f"    final mse_own_pred:  {bias_results['mse_clean_own_pred'][0]:.4e}")
+        print(f"    final mse_own_pred 5steps:  {bias_results['mse_clean_own_pred_5'][0]:.4e}")
+
 
     if all_bias_metrics:
         bias_path = os.path.join(args.output_dir, "dw_bias_metrics.json")

@@ -1,9 +1,10 @@
 """
 Phase 1: Exploration
 
-Trains on a dense log-uniform schedule, progressively removing noise levels
-as they satisfy B_own(sigma) <= tau. Saves a per-level checkpoint for each
-solved sigma so Phase 2 (greedy schedule construction) can reuse them.
+Trains on a dense log-uniform schedule, starting with the K largest noise
+levels and progressively unlocking lower ones as upper levels are solved
+(B_own(sigma) <= tau). Saves a per-level checkpoint for each solved sigma
+so Phase 2 (greedy schedule construction) can reuse them.
 
 Usage:
     python train_exploration.py +experiment=kolmo_exploration
@@ -13,6 +14,7 @@ Expected config keys (under `training`):
     log_sigma_min        : float  (default -3.0)
     log_sigma_max        : float  (default -0.0001)
     n_exploration_levels : int    (default 40)
+    n_active_start       : int    (default 10)   -- K largest sigmas to start with
     epochs_per_pass      : int    (default 50)   -- training epochs between evaluations
     eval_every_epoch     : int    (default 0)    -- evaluate B_own every N epochs within a pass (0=only at end)
     max_passes           : int    (default 30)   -- hard stop on number of passes
@@ -140,6 +142,7 @@ def main(cfg: DictConfig):
     max_passes          = int(tr.get('max_passes', 30))
     n_eval_batches      = int(tr.get('n_eval_batches', 30))
 
+    n_active_start      = int(tr.get('n_active_start', min(10, n_levels)))
     lr_start            = float(tr.get('learning_rate_start', 1e-4))
     lr_end              = float(tr.get('learning_rate_end', 1e-6))
     checkpoint_dir      = cfg.checkpoint_dir
@@ -158,7 +161,8 @@ def main(cfg: DictConfig):
     all_sigmas = torch.tensor(10.0 ** log_sigmas, dtype=torch.float32)  # (N,) low→high
 
     log.info(f"Exploration schedule: {n_levels} levels, "
-             f"sigma in [{10**log_sigma_min:.2e}, {10**log_sigma_max:.2e}], tau={tau}")
+             f"sigma in [{10**log_sigma_min:.2e}, {10**log_sigma_max:.2e}], tau={tau}, "
+             f"starting with {n_active_start} largest levels")
 
     # --- Data ---
     data_cfg = DataConfig(**OmegaConf.to_container(cfg.data, resolve=True))
@@ -180,8 +184,14 @@ def main(cfg: DictConfig):
     criterion = torch.nn.MSELoss()
 
     # --- Exploration state ---
-    # active_mask[i] = True means sigma i still needs training
-    active_mask   = torch.ones(n_levels, dtype=torch.bool)
+    # all_sigmas is ordered low→high; we start with the n_active_start largest
+    # and unlock lower levels one-for-one as upper levels are solved.
+    active_mask         = torch.zeros(n_levels, dtype=torch.bool)
+    active_mask[-n_active_start:] = True
+    # next_to_activate: index of the next sigma to unlock (moves downward from
+    # n_levels - n_active_start - 1 toward 0; -1 means nothing left to unlock)
+    next_to_activate    = n_levels - n_active_start - 1
+
     solved        = {}   # sigma_value (float) → {checkpoint, clean_error, ratio, pass}
     state_path    = os.path.join(checkpoint_dir, 'exploration_state.json')
     patience              = int(tr.get('exploration_patience', 5))  # passes without progress before stopping
@@ -193,11 +203,13 @@ def main(cfg: DictConfig):
         n_active       = active_mask.sum().item()
         active_sigmas  = all_sigmas[active_mask]
 
-        if n_active == 0:
+        if n_active == 0 and next_to_activate < 0:
             log.info("All noise levels solved. Stopping.")
             break
 
-        log.info(f"\n=== Pass {pass_idx + 1}/{max_passes}  |  active levels: {n_active} ===")
+        n_pending = next_to_activate + 1
+        log.info(f"\n=== Pass {pass_idx + 1}/{max_passes}  |  active: {n_active}  |  "
+                 f"pending: {n_pending}  |  solved: {len(solved)} ===")
 
         # Update model schedule to active levels only and reset LR scheduler
         model.compute_schedule_variables(active_sigmas.to(device))
@@ -247,10 +259,17 @@ def main(cfg: DictConfig):
                         active_mask[global_idx] = False
                         newly_solved_mid += 1
                 if newly_solved_mid > 0:
+                    n_unlocked_mid = 0
+                    for _ in range(newly_solved_mid):
+                        if next_to_activate >= 0:
+                            active_mask[next_to_activate] = True
+                            next_to_activate -= 1
+                            n_unlocked_mid += 1
                     active_sigmas = all_sigmas[active_mask]
                     model.compute_schedule_variables(active_sigmas.to(device))
-                    log.info(f"  Removed {newly_solved_mid} solved level(s) mid-pass; "
-                             f"{active_mask.sum().item()} remaining.")
+                    log.info(f"  Removed {newly_solved_mid} solved level(s) mid-pass, "
+                             f"unlocked {n_unlocked_mid} new; "
+                             f"{active_mask.sum().item()} active.")
 
         # -- End-of-pass evaluation: register checkpoints AND remove solved levels --
         sigmas_eval, mean_ratios, mean_cleans = compute_b_own(
@@ -285,6 +304,14 @@ def main(cfg: DictConfig):
             active_mask[global_idx] = False
             newly_solved += 1
 
+        # Unlock one lower level for each level solved this pass
+        n_unlocked = 0
+        for _ in range(newly_solved):
+            if next_to_activate >= 0:
+                active_mask[next_to_activate] = True
+                next_to_activate -= 1
+                n_unlocked += 1
+
         # Persist state after every pass
         with open(state_path, 'w') as f:
             json.dump(
@@ -293,7 +320,9 @@ def main(cfg: DictConfig):
             )
 
         log.info(f"Pass {pass_idx + 1} done: {newly_solved} newly solved, "
-                 f"{active_mask.sum().item()} remaining.")
+                 f"{n_unlocked} new level(s) unlocked, "
+                 f"{active_mask.sum().item()} active, "
+                 f"{next_to_activate + 1} pending.")
 
         if newly_solved == 0:
             passes_without_progress += 1

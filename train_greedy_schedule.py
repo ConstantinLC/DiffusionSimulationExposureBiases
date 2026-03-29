@@ -56,7 +56,7 @@ def compute_two_step_bias_cross_checkpoint(
 
     # Schedule buffers change shape per evaluation pair; strip them so load_state_dict
     # doesn't raise on size mismatch — compute_schedule_variables sets them below.
-    _SCHEDULE_KEYS = {'sqrtAlphasCumprod', 'sqrtOneMinusAlphasCumprod', 'unet.sigmas'}
+    _SCHEDULE_KEYS = {'sqrtAlphasCumprod', 'sqrtOneMinusAlphasCumprod', 'unet.sigmas', 'level_weights'}
 
     def _load_weights(ckpt):
         model.load_state_dict({k: v for k, v in ckpt.items() if k not in _SCHEDULE_KEYS}, strict=False)
