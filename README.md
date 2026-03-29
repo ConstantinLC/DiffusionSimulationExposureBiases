@@ -1,4 +1,4 @@
-# Diffusion Multi-Steps
+# Bridging Diffusion and Simulation Exposure Biases for Autoregressive PDE Simulations
 
 Research codebase accompanying the paper **"Bridging Diffusion and Simulation Exposure Biases for Autoregressive PDE Simulations"**.
 
