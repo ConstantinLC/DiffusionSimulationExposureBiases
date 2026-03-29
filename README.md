@@ -1,6 +1,6 @@
 # Diffusion Multi-Steps
 
-Research codebase accompanying the paper **"Bridging Diffusion and Simulation Exposure Biases for Autoregressive PDE Simulations"** (ICML 2026 submission).
+Research codebase accompanying the paper **"Bridging Diffusion and Simulation Exposure Biases for Autoregressive PDE Simulations"**.
 
 ## Problem
 
