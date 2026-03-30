@@ -1,0 +1,47 @@
+# @package _global_
+defaults:
+  - override /model: unet_2d
+
+data:
+  dataset_name: WeatherBench
+  data_path: ???   # path to WeatherBench 1 directory (containing geopotential_500/, temperature_850/, ...)
+  variables: [z500, t850]
+  resolution: 64
+  frames_per_step: 1        # stride in 6-hourly timesteps (1 = 6h, 4 = 24h)
+  traj_length: 56           # 14 days at 6-hourly with frames_per_step=1
+  frames_per_time_step: 1
+  limit_trajectories_train: -1
+  limit_trajectories_val: -1
+  batch_size: 32
+  val_batch_size: 32
+
+model:
+  dimension: 2
+  dataSize: [64, 128]
+  condChannels: 2
+  dataChannels: 2
+  padding_mode: zeros       # not periodic: lat/lon boundaries are not cyclic in lat
+
+pretraining:
+  num_epochs: 1001
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-6
+  T_max: 1001
+  device: cuda
+  epoch_sampling_frequency: 50
+
+finetuning:
+  num_epochs: 201
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-6
+  T_max: 201
+  device: cuda
+  epoch_sampling_frequency: 50
+
+loss:
+  image_size: [64, 128]
+  eval_traj_metrics: [mse, corr]
+  primary_metric: corr
+
+wandb:
+  project: WeatherBench

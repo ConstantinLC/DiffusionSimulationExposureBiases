@@ -21,10 +21,13 @@ class TrainingConfig(BaseModel):
     first_ar_step_noising_step_limit: Optional[int] = None
     end_to_end: bool = False
     track_instability: bool = False
+    n_noise_samples: int = 1
+    validate_every_k: int = 10
 
 
 class DataConfig(BaseModel):
-    dataset_name: Literal["KolmogorovFlow", "KuramotoSivashinsky", "TransonicFlow"]
+    dataset_name: Literal["KolmogorovFlow", "KuramotoSivashinsky", "TransonicFlow", "WeatherBench"]
+    variables: Optional[list[str]] = None  # WeatherBench variable keys, e.g. ['z500', 't850']
     data_path: str
     resolution: int
     super_resolution: bool = False

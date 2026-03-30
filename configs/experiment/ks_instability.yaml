@@ -16,14 +16,16 @@ model:
   dataSize: [64]
   condChannels: 1
   dataChannels: 1
-  diffSchedule: linear
+  diffSchedule: log_linear
   diffSteps: 20
   padding_mode: circular
 
 pretraining:
-  num_epochs: 100
+  num_epochs: 1000
   learning_rate_start: 1.0e-4
   learning_rate_end: 1.0e-4
-  T_max: 100
+  T_max: 1000
   epoch_sampling_frequency: 50
   track_instability: true
+  n_noise_samples: 10
+  validate_every_k: 10

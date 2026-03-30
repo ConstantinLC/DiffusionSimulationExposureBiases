@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from ..utils.diffusion import linear_beta_schedule, quadratic_beta_schedule, sigmoid_beta_schedule
 from ..utils.diffusion import cosine_beta_schedule, cubic_beta_schedule, initial_exploration_beta_schedule
-from ..utils.diffusion import psd_beta_schedule, cosine_sigma_schedule
+from ..utils.diffusion import psd_beta_schedule, cosine_sigma_schedule, schedule_log_linear
 from ..utils.diffusion import sigmas_from_betas
 from ..utils.diffusion import prep
 from .unet_2d import Unet
@@ -46,14 +46,10 @@ class DiffusionModel(nn.Module):
         elif diffSchedule == "psd":
             sigmas = sigmas_from_betas(psd_beta_schedule(timesteps=self.timesteps))
             self.timesteps=100
-        elif diffSchedule == "inverseCosLog-1.875":
-            sigmas = cosine_sigma_schedule(10**-1.875, 10**-0.0001, 20)
-            sigmas = torch.concatenate((torch.ones(80)*sigmas[0], sigmas))
-            self.timesteps=100
-        elif diffSchedule == "inverseCosLog-1.5":
-            sigmas = cosine_sigma_schedule(10**-1.5, 10**-0.0001, self.timesteps)
         elif diffSchedule == "initial_exploration":
             sigmas = initial_exploration_beta_schedule(min_log_value=-2.5, timesteps=self.timesteps)
+        elif diffSchedule == "log_linear":
+            sigmas = schedule_log_linear(sigma_min=1e-3, sigma_max=0.999, T=self.timesteps)
         elif "single" in diffSchedule:
             log_sigma = diffSchedule.split("_")[1]
             sigmas = torch.tensor([10 ** float(log_sigma)])

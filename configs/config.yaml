@@ -24,6 +24,8 @@ training:
   finetuning_steps: 0
   perform_binary_search: false
   track_instability: false
+  n_noise_samples: 1
+  validate_every_k: 10
   best_log_sigma: null
   channels_per_frame: null
   first_ar_step_noising_step_limit: null

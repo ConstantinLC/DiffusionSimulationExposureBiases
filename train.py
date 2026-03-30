@@ -238,6 +238,8 @@ def main(cfg: DictConfig) -> None:
                 device=device,
                 is_master=is_master,
                 track_instability=config.training.track_instability,
+                n_noise_samples=config.training.n_noise_samples,
+                validate_every_k=config.training.validate_every_k,
             )
         else:
             if isinstance(config.model, RefinerConfig):
