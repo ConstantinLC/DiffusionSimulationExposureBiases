@@ -77,8 +77,7 @@ class DiffusionModelConfig(_NeuralBase):
     diffCondIntegration: str = "clean"
     load_betas: bool = False
     schedule_path: Optional[str] = None  # path to greedy schedule JSON (used when diffSchedule="from_file")
-    level_weights: Optional[list[float]] = None  # per-noise-level training weights; None = uniform
-    sigma_min: Optional[float] = None  # used by diffSchedule="log_uniform"
+sigma_min: Optional[float] = None  # used by diffSchedule="log_uniform"
     sigma_max: Optional[float] = None  # used by diffSchedule="log_uniform"
 
 

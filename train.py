@@ -43,7 +43,6 @@ def build_model(config: ExperimentConfig) -> nn.Module:
             checkpoint=mp.checkpoint,
             load_betas=mp.load_betas,
             schedule_path=mp.schedule_path,
-            level_weights=mp.level_weights,
             sigma_min=mp.sigma_min,
             sigma_max=mp.sigma_max,
         )
