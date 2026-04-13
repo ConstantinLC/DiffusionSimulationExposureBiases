@@ -31,7 +31,7 @@ training:
   n_exploration_levels: 100
   epochs_per_pass: 1000
   eval_every_epoch: 50
-  max_passes: 5
+  max_passes: 1
   n_eval_batches: 30
   learning_rate_start: 1.0e-4
   learning_rate_end: 1.0e-6

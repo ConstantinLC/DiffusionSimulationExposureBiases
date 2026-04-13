@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - override /dataset: weatherbench
+
+checkpoint_dir: ./checkpoints/WeatherBench/forecasting
+
+data:
+  data_path: /mnt/SSD2/constantin/data/weatherbench
+  prediction_steps: 1
