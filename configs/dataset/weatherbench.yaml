@@ -20,7 +20,7 @@ model:
   dataSize: [64, 128]
   condChannels: 2
   dataChannels: 2
-  padding_mode: zeros       # not periodic: lat/lon boundaries are not cyclic in lat
+  padding_mode: lonlat      # circular on longitude (periodic), zero on latitude (non-periodic)
 
 pretraining:
   num_epochs: 1001

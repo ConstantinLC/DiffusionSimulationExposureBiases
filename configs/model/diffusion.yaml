@@ -7,3 +7,5 @@ inferenceSamplingMode: ddpm
 inferenceConditioningIntegration: clean
 diffCondIntegration: clean
 checkpoint: ""
+sigma_min: null
+sigma_max: null

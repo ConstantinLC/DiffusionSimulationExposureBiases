@@ -7,6 +7,19 @@ from einops import rearrange
 from functools import partial
 
 ### MODEL BLOCK DEFINITIONS (based on Ho et al.)
+
+class LonLatPad(nn.Module):
+    """Circular (periodic) padding on longitude (width) and zero padding on latitude (height)."""
+    def __init__(self, pad):
+        super().__init__()
+        self.pad = pad
+
+    def forward(self, x):
+        x = F.pad(x, (self.pad, self.pad, 0, 0), mode='circular')
+        x = F.pad(x, (0, 0, self.pad, self.pad), mode='constant', value=0)
+        return x
+
+
 class Residual(nn.Module):
     def __init__(self, fn):
         super().__init__()
@@ -23,6 +36,8 @@ def Upsample(dim):
     #)
 
 def Downsample(dim, padding_mode='circular'):
+    if padding_mode == 'lonlat':
+        return nn.Sequential(LonLatPad(1), nn.Conv2d(dim, dim, 4, 2, padding=0))
     return nn.Conv2d(dim, dim, 4, 2, 1, padding_mode=padding_mode)
 
 
@@ -44,7 +59,10 @@ class SinusoidalPositionEmbeddings(nn.Module):
 class Block(nn.Module):
     def __init__(self, dim, dim_out, groups = 8, padding_mode='circular'):
         super().__init__()
-        self.proj = nn.Conv2d(dim, dim_out, 3, padding = 1, padding_mode=padding_mode)
+        if padding_mode == 'lonlat':
+            self.proj = nn.Sequential(LonLatPad(1), nn.Conv2d(dim, dim_out, 3, padding=0))
+        else:
+            self.proj = nn.Conv2d(dim, dim_out, 3, padding=1, padding_mode=padding_mode)
         self.norm = nn.GroupNorm(groups, dim_out)
         self.act = nn.SiLU()
 
@@ -70,9 +88,9 @@ class ResnetBlock(nn.Module):
             if time_emb_dim is not None else None
         )
 
-        self.block1 = Block(dim, dim_out, groups=groups)
-        self.block2 = Block(dim_out, dim_out, groups=groups)
-        self.res_conv = nn.Conv2d(dim, dim_out, 1, padding_mode=padding_mode) if dim != dim_out else nn.Identity()
+        self.block1 = Block(dim, dim_out, groups=groups, padding_mode=padding_mode)
+        self.block2 = Block(dim_out, dim_out, groups=groups, padding_mode=padding_mode)
+        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb=None):
         h = self.block1(x)
@@ -95,17 +113,28 @@ class ConvNextBlock(nn.Module):
             if time_emb_dim is not None else None
         )
 
-        self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim, padding_mode=padding_mode)
+        if padding_mode == 'lonlat':
+            self.ds_conv = nn.Sequential(LonLatPad(3), nn.Conv2d(dim, dim, 7, padding=0, groups=dim))
+            self.net = nn.Sequential(
+                nn.GroupNorm(1, dim) if norm else nn.Identity(),
+                LonLatPad(1),
+                nn.Conv2d(dim, dim_out * mult, 3, padding=0),
+                nn.GELU(),
+                nn.GroupNorm(1, dim_out * mult),
+                LonLatPad(1),
+                nn.Conv2d(dim_out * mult, dim_out, 3, padding=0),
+            )
+        else:
+            self.ds_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim, padding_mode=padding_mode)
+            self.net = nn.Sequential(
+                nn.GroupNorm(1, dim) if norm else nn.Identity(),
+                nn.Conv2d(dim, dim_out * mult, 3, padding=1, padding_mode=padding_mode),
+                nn.GELU(),
+                nn.GroupNorm(1, dim_out * mult),
+                nn.Conv2d(dim_out * mult, dim_out, 3, padding=1, padding_mode=padding_mode),
+            )
 
-        self.net = nn.Sequential(
-            nn.GroupNorm(1, dim) if norm else nn.Identity(),
-            nn.Conv2d(dim, dim_out * mult, 3, padding=1, padding_mode=padding_mode),
-            nn.GELU(),
-            nn.GroupNorm(1, dim_out * mult),
-            nn.Conv2d(dim_out * mult, dim_out, 3, padding=1, padding_mode=padding_mode),
-        )
-
-        self.res_conv = nn.Conv2d(dim, dim_out, 1, padding_mode=padding_mode) if dim != dim_out else nn.Identity()
+        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb=None):
         h = self.ds_conv(x)
@@ -227,15 +256,18 @@ class Unet(nn.Module):
             self.register_buffer("sigmas", sigmas)
 
         init_dim = init_dim if init_dim is not None else dim // 3 * 2
-        self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3, padding_mode=self.padding_mode)
+        if padding_mode == 'lonlat':
+            self.init_conv = nn.Sequential(LonLatPad(3), nn.Conv2d(channels, init_dim, 7, padding=0))
+        else:
+            self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3, padding_mode=self.padding_mode)
 
         dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
 
         if use_convnext:
-            block_klass = partial(ConvNextBlock, mult=convnext_mult)
+            block_klass = partial(ConvNextBlock, mult=convnext_mult, padding_mode=padding_mode)
         else:
-            block_klass = partial(ResnetBlock, groups=resnet_block_groups)
+            block_klass = partial(ResnetBlock, groups=resnet_block_groups, padding_mode=padding_mode)
 
         # time embeddings
         if with_time_emb:
@@ -266,7 +298,7 @@ class Unet(nn.Module):
                         block_klass(dim_in, dim_out, time_emb_dim=time_dim),
                         block_klass(dim_out, dim_out, time_emb_dim=time_dim),
                         Residual(PreNorm(dim_out, LinearAttention(dim_out))),
-                        Downsample(dim_out) if not is_last else nn.Identity(),
+                        Downsample(dim_out, padding_mode=padding_mode) if not is_last else nn.Identity(),
                     ]
                 )
             )
@@ -292,7 +324,7 @@ class Unet(nn.Module):
 
         out_dim = out_dim if out_dim is not None else channels
         self.final_conv = nn.Sequential(
-            block_klass(dim, dim), nn.Conv2d(dim, out_dim, 1, padding_mode=self.padding_mode)
+            block_klass(dim, dim), nn.Conv2d(dim, out_dim, 1)
         )
 
 

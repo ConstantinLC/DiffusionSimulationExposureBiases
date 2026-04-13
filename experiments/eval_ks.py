@@ -48,6 +48,26 @@ def correlation(qa, qb):
     return pearsonr(qa.ravel(), qb.ravel())[0]
 
 
+def cosine_similarity(a, b):
+    """Compute cosine similarity between two tensors.
+    a, b: (B, ...) tensors
+    Returns: (B,) tensor of cosine similarities
+    """
+    a_flat = a.reshape(a.shape[0], -1)  # (B, D)
+    b_flat = b.reshape(b.shape[0], -1)  # (B, D)
+
+    # Compute dot product
+    dot_product = (a_flat * b_flat).sum(dim=1)  # (B,)
+
+    # Compute norms
+    norm_a = torch.norm(a_flat, dim=1)  # (B,)
+    norm_b = torch.norm(b_flat, dim=1)  # (B,)
+
+    # Cosine similarity
+    cos_sim = dot_product / (norm_a * norm_b + 1e-8)  # (B,)
+    return cos_sim
+
+
 def load_config(checkpoint_dir: str) -> dict:
     config_path = os.path.join(checkpoint_dir, "config.json")
     with open(config_path, "r") as f:
@@ -200,7 +220,7 @@ def evaluate_dw_bias(model, val_loader, device):
     """
     model.eval()
     n_steps = model.timesteps if isinstance(model, DiffusionModel) else model.nTimesteps
-    sum_mse = {k: np.zeros(n_steps) for k in ("ancestor", "clean", "own_pred", "own_pred_5")}
+    sum_mse = {k: np.zeros(n_steps) for k in ("ancestor", "clean", "own_pred", "alternative_own_pred", "standard_own_pred", "cosine_similarity")}
     n_batches = 0
 
     # PDERefiner returns estimates in inference order (high → low sigma, index 0 = highest)
@@ -220,28 +240,41 @@ def evaluate_dw_bias(model, val_loader, device):
                                 return_x0_estimate=True, input_type="clean")
             _, x0_own_pred = model(conditioning=conditioning_frame, data=target_frame,
                                    return_x0_estimate=True, input_type="own-pred")
-            _, x0_own_pred_5 = model(conditioning=conditioning_frame, data=target_frame,
-                                   return_x0_estimate=True, input_type="own-pred_5")
 
             if needs_flip:
                 x0_ancestor = torch.flip(x0_ancestor, [0])
                 x0_clean = torch.flip(x0_clean, [0])
                 x0_own_pred = torch.flip(x0_own_pred, [0])
-                x0_own_pred_5 = torch.flip(x0_own_pred_5, [0])
 
             for t in range(n_steps):
+                B = target_frame.shape[0]
                 sum_mse["ancestor"][t]  += torch.mean((x0_ancestor[t]  - target_frame) ** 2).item()
                 sum_mse["clean"][t]     += torch.mean((x0_clean[t]     - target_frame) ** 2).item()
                 sum_mse["own_pred"][t]  += torch.mean((x0_own_pred[t]  - target_frame) ** 2).item()
-                sum_mse["own_pred_5"][t]  += torch.mean((x0_own_pred_5[t]  - target_frame) ** 2).item()
+                num = torch.norm((x0_own_pred[t] - x0_clean[t]).reshape(B, -1), dim=1)
+                den = torch.norm((x0_clean[t] - target_frame).reshape(B, -1), dim=1)
+                sum_mse["alternative_own_pred"][t] += (num / den).mean().item()
+                num = torch.norm((x0_own_pred[t] - target_frame).reshape(B, -1), dim=1)
+                den = torch.norm((x0_clean[t] - target_frame).reshape(B, -1), dim=1)
+                sum_mse["standard_own_pred"][t] += (num / den).mean().item()
+
+                # Cosine similarity between (x0_own_pred - target_frame) and (x0_clean - target_frame)
+                vec_own_pred = x0_own_pred[t] - target_frame
+                vec_clean = x0_clean[t] - target_frame
+                cos_sim = cosine_similarity(vec_own_pred, vec_clean)
+                sum_mse["cosine_similarity"][t] += cos_sim.mean().item()
+
             n_batches += 1
 
     print(f"  DW bias evaluated over {n_batches} batches")
+    print(sum_mse["alternative_own_pred"]   / n_batches)
     return {
         "mse_ancestor":       (sum_mse["ancestor"]  / n_batches).tolist(),
         "mse_clean":          (sum_mse["clean"]      / n_batches).tolist(),
         "mse_clean_own_pred": (sum_mse["own_pred"]   / n_batches).tolist(),
-        "mse_clean_own_pred_5": (sum_mse["own_pred_5"]   / n_batches).tolist(),
+        "mse_alternative_own_pred": (sum_mse["alternative_own_pred"]   / n_batches).tolist(),
+        "mse_standard_own_pred": (sum_mse["standard_own_pred"]   / n_batches).tolist(),
+        "cosine_similarity": (sum_mse["cosine_similarity"] / n_batches).tolist(),
     }
 
 
@@ -252,7 +285,7 @@ def plot_dw_bias(results, noise_levels, name, output_dir):
     print(results)
     results = {k: v if isinstance(v, list) else v for k, v in results.items()}
 
-    fig, axes = plt.subplots(2, 1, figsize=(6, 8), sharex=True)
+    fig, axes = plt.subplots(6, 1, figsize=(6, 24), sharex=True)
 
     noise_arr = np.array(noise_levels)
     bins = np.logspace(np.log10(max(noise_arr.min(), 1e-10)), np.log10(noise_arr.max()), 20)
@@ -267,14 +300,11 @@ def plot_dw_bias(results, noise_levels, name, output_dir):
                  label="Inference input (Ancestor)", color='red', linestyle='solid', linewidth=2)
     axes[1].plot(noise_levels, results["mse_clean_own_pred"],
                  label="Inference input (Own Pred)", color='green', linestyle='dashdot', linewidth=2)
-    axes[1].plot(noise_levels, results["mse_clean_own_pred_5"],
-                 label="Inference input (Own Pred 5 steps)", color='green', linestyle='dashdot', linewidth=2)
 
     axes[1].set_yscale('log')
     axes[1].set_xscale('log')
     axes[1].grid(True, which='both', linestyle='--', alpha=0.3)
     axes[1].set_ylabel('MSE w/ Ground Truth')
-    axes[1].set_xlabel(r'Noise Level $\sqrt{1-\bar{\alpha}_t}$ (Log Scale)')
     axes[1].legend(fontsize=10)
 
     summary = (
@@ -282,9 +312,61 @@ def plot_dw_bias(results, noise_levels, name, output_dir):
         f"  Clean:    {results['mse_clean'][0]:.2e}\n"
         f"  Ancestor: {results['mse_ancestor'][0]:.2e}\n"
         f"  Own-Pred: {results['mse_clean_own_pred'][0]:.2e}"
-        f"  Own-Pred-5Steps: {results['mse_clean_own_pred_5'][0]:.2e}"
     )
     axes[1].text(0.05, 0.95, summary, transform=axes[1].transAxes,
+                 fontsize=9, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+
+    axes[2].plot(noise_levels, results["mse_alternative_own_pred"],
+                 label="Alternative Own Pred", color='orange', linestyle='solid', linewidth=2)
+
+    axes[2].set_xscale('log')
+    axes[2].grid(True, which='both', linestyle='--', alpha=0.3)
+    axes[2].set_ylabel('Alternative Own Pred Metric')
+    axes[2].set_xlabel(r'Noise Level $\sqrt{1-\bar{\alpha}_t}$ (Log Scale)')
+    axes[2].legend(fontsize=10)
+
+    alt_summary = f"Final: {results['mse_alternative_own_pred'][0]:.2e}"
+    axes[2].text(0.05, 0.95, alt_summary, transform=axes[2].transAxes,
+                 fontsize=9, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+
+    own_pred_bias = np.array(results["mse_clean_own_pred"]) / np.array(results["mse_clean"])
+    axes[3].plot(noise_levels, own_pred_bias, color='green', linestyle='solid', linewidth=2)
+    axes[3].axhline(1, color='black', linestyle='--', linewidth=1, alpha=0.5)
+    axes[3].set_xscale('log')
+    axes[3].grid(True, which='both', linestyle='--', alpha=0.3)
+    axes[3].set_ylabel('Own-Pred Bias (MSE Ratio)')
+    axes[3].set_xlabel(r'Noise Level $\sqrt{1-\bar{\alpha}_t}$ (Log Scale)')
+    axes[3].text(0.05, 0.95, f"Final bias: {own_pred_bias[0]:.2e}", transform=axes[3].transAxes,
+                 fontsize=9, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+
+    axes[4].plot(noise_levels, results["mse_standard_own_pred"],
+                 label="Standard Own Pred", color='purple', linestyle='solid', linewidth=2)
+
+    axes[4].set_xscale('log')
+    axes[4].grid(True, which='both', linestyle='--', alpha=0.3)
+    axes[4].set_ylabel('Standard Own Pred Metric')
+    axes[4].set_xlabel(r'Noise Level $\sqrt{1-\bar{\alpha}_t}$ (Log Scale)')
+    axes[4].legend(fontsize=10)
+
+    std_summary = f"Final: {results['mse_standard_own_pred'][0]:.2e}"
+    axes[4].text(0.05, 0.95, std_summary, transform=axes[4].transAxes,
+                 fontsize=9, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+
+    axes[5].plot(noise_levels, results["cosine_similarity"],
+                 label="Cosine Similarity", color='brown', linestyle='solid', linewidth=2)
+
+    axes[5].set_xscale('log')
+    axes[5].grid(True, which='both', linestyle='--', alpha=0.3)
+    axes[5].set_ylabel('Cosine Similarity')
+    axes[5].set_xlabel(r'Noise Level $\sqrt{1-\bar{\alpha}_t}$ (Log Scale)')
+    axes[5].legend(fontsize=10)
+
+    cos_summary = f"Final: {results['cosine_similarity'][0]:.4f}"
+    axes[5].text(0.05, 0.95, cos_summary, transform=axes[5].transAxes,
                  fontsize=9, verticalalignment='top',
                  bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
 
@@ -474,17 +556,19 @@ def main():
             "mse_ancestor": bias_results["mse_ancestor"],
             "mse_clean": bias_results["mse_clean"],
             "mse_clean_own_pred": bias_results["mse_clean_own_pred"],
-            "mse_clean_own_pred_5": bias_results["mse_clean_own_pred_5"],
+            "mse_alternative_own_pred": bias_results["mse_alternative_own_pred"],
+            "cosine_similarity": bias_results["cosine_similarity"],
             "final_mse_ancestor": bias_results["mse_ancestor"][0],
             "final_mse_clean": bias_results["mse_clean"][0],
             "final_mse_clean_own_pred": bias_results["mse_clean_own_pred"][0],
-            "final_mse_clean_own_pred_5": bias_results["mse_clean_own_pred_5"][0],
+            "final_mse_alternative_own_pred": bias_results["mse_alternative_own_pred"][0],
+            "final_cosine_similarity": bias_results["cosine_similarity"][0],
             "sum_errors": np.sum(np.array(bias_results["mse_clean"]) - np.array(bias_results["mse_clean_own_pred"]))
         }
         print(f"    final mse_ancestor:  {bias_results['mse_ancestor'][0]:.4e}")
         print(f"    final mse_clean:     {bias_results['mse_clean'][0]:.4e}")
         print(f"    final mse_own_pred:  {bias_results['mse_clean_own_pred'][0]:.4e}")
-        print(f"    final mse_own_pred 5steps:  {bias_results['mse_clean_own_pred_5'][0]:.4e}")
+        print(f"    final mse_own_pred 5steps:  {bias_results['mse_alternative_own_pred'][0]:.4e}")
 
 
     if all_bias_metrics:

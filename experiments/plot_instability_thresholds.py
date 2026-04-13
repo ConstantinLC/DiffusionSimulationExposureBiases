@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-Plot instability threshold curves gamma(sigma, tau) for multiple datasets.
+Plot instability threshold curves gamma(sigma, tau) for a single run.
 
-Reads error_tracking_map.json files produced by train_diffusion_model with
+Reads error_tracking_map.json produced by train_diffusion_model with
 track_instability=True and generates Figure 2 of the paper: for each
 (sigma, tau) pair, the clean-input error E_clean at which the own-prediction
 ratio B^(own) first dropped below tau.
@@ -13,10 +13,7 @@ This validates Hypothesis 3.1:
 
 Usage:
   python experiments/plot_instability_thresholds.py \
-      --maps kolmo=checkpoints/KolmogorovFlow/instability_threshold/*/error_tracking_map.json \
-             ks=checkpoints/KuramotoSivashinsky/instability_threshold/*/error_tracking_map.json \
-             tra=checkpoints/TransonicFlow/instability_threshold/*/error_tracking_map.json \
-      --output results/instability_thresholds_all_datasets.pdf
+      --run checkpoints/KolmogorovFlow/instability_threshold/run_001
 """
 import os
 import sys
@@ -193,6 +190,10 @@ DATASET_LABELS = {
     "kolmo": "Kolmogorov Flow",
     "ks": "Kuramoto-Sivashinsky",
     "tra": "Transonic Flow",
+    "kolmogorovflow": "Kolmogorov Flow",
+    "kuramotosivashinsky": "Kuramoto-Sivashinsky",
+    "transonicflow": "Transonic Flow",
+    "weatherbench": "WeatherBench",
 }
 
 
@@ -201,173 +202,123 @@ def load_map(path: str) -> dict:
         return json.load(f)
 
 
-def gamma_theory(sigma, tau, phi=1.0):
-    """
-    Theoretical instability threshold (Remark H.6):
-        gamma(sigma, tau) = (tau - 1) * phi * sigma^2 / (1 - sigma^2)
-
-    phi is the spectral flatness of the prediction error:
-        phi = mean_k P(k) / max_k P(k)  in [1/d, 1]
-
-    phi = 1   -> white error (Parseval / L2 bound, overestimates gamma)
-    phi = 1/d -> error concentrated in one mode (tightest bound)
-    """
-    sigma = np.asarray(sigma)
-    return (tau - 1.0) * phi * sigma ** 2 / (1.0 - sigma ** 2)
-
-
-def plot_single_dataset(ax, data: dict, title: str, show_ylabel=True, show_legend=True,
-                        x_scale_power=1.0, phi_dict=None):
-    """Plot gamma(sigma, tau) curves for a single dataset."""
+def plot_one(ax, data: dict, label: str = None, show_ylabel=True, show_legend=True):
+    """Plot gamma(sigma, tau) curves for a single dataset onto ax."""
     x_values = sorted([float(k) for k in data.keys()])
     all_taus = sorted(set(t for sub in data.values() for t in sub.keys()))
-
     colors = plt.cm.plasma(np.linspace(0, 0.85, len(all_taus)))
-    SIGMA_SMOOTHING = 2.0
 
-    # Collect all y-values to set tight axis limits after plotting
     all_ys = []
     all_xs_plotted = []
 
-    for idx, tau_str in enumerate(all_taus):
+    curves = []
+    for tau_str in all_taus:
         xs, ys = [], []
         for x in x_values:
             key = next((k for k in data.keys() if abs(float(k) - x) < 1e-9), None)
             if key and tau_str in data[key]:
+                entry = data[key][tau_str]
+                if "clean_errors" in entry:
+                    val = float(np.mean(entry["clean_errors"]))
+                else:
+                    val = entry["clean_error"]
                 xs.append(x)
-                ys.append(data[key][tau_str]["clean_error"])
-
+                ys.append(val)
         if len(xs) > 1:
-            label = rf"$\tau = {tau_str}$"
-            ax.plot(xs, ys, label=label, color=colors[idx], alpha=1.0, zorder=idx + 10)
-            y_floor = min(ys) * 0.5
-            ax.fill_between(xs, ys, y_floor, color=colors[idx], alpha=0.12, zorder=idx)
+            curves.append((tau_str, xs, ys))
             all_ys.extend(ys)
             all_xs_plotted.extend(xs)
 
-            # Theoretical bound with spectral flatness correction (Remark H.6)
-            tau_val = float(tau_str)
-            xs_arr = np.array(xs)
-            phi = phi_dict if phi_dict is not None else 1.0
-            gamma = gamma_theory(xs_arr, tau_val, phi=phi)
-            ax.plot(xs_arr, gamma, color=colors[idx], alpha=0.5, linestyle='--',
-                    linewidth=1.2, zorder=idx + 5)
+    # For each sigma, collect which taus have data (to decide red-cross condition)
+    sigma_to_taus = {}
+    for tau_str, xs, ys in curves:
+        for x in xs:
+            sigma_to_taus.setdefault(x, set()).add(float(tau_str))
 
+    for tau_str, xs, ys in curves:
+        tau_idx = all_taus.index(tau_str)
+        ys_arr = np.array(ys)
+        if len(ys_arr) >= 3:
+            ys_smooth = np.exp(gaussian_filter1d(np.log(ys_arr), sigma=1.5))
+        else:
+            ys_smooth = ys_arr
+        ax.plot(xs, ys_smooth, label=rf"$\gamma(\sigma, {tau_str})$",
+                color=colors[tau_idx], alpha=1.0, zorder=tau_idx + 10)
+        y_floor = min(ys) * 0.5
+        ax.fill_between(xs, ys_smooth, y_floor, color=colors[tau_idx], alpha=0.12, zorder=tau_idx)
+        # Red cross at leftmost point if no smaller tau has data at that sigma
+        leftmost_sigma = xs[0]
+        smaller_taus_at_sigma = [t for t in sigma_to_taus.get(leftmost_sigma, set())
+                                  if t < float(tau_str)]
+        if not smaller_taus_at_sigma:
+            ax.plot(leftmost_sigma, ys_smooth[0], marker='x', color='red', markersize=8,
+                    markeredgewidth=2, zorder=tau_idx + 20, linestyle='none')
 
-
-    # Add a single proxy artist for the theoretical bound in the legend (Corollary H.5)
-    if all_xs_plotted:
-        ax.plot([], [], color='gray', linestyle='--', linewidth=1.2,
-                label=r'$(\tau{-}1)\,C(P,\sigma)\,\mathrm{SNR}_\mathrm{diff}^{-1}$')
-
-    # Tight axis limits based on actual data
     if all_ys and all_xs_plotted:
-        y_min = min(all_ys)
-        y_max = max(all_ys)
-        x_min = min(all_xs_plotted)
-        x_max = max(all_xs_plotted)
-        margin_y = 0.5  # one half-decade of padding
-        ax.set_ylim(y_min * 10**(-margin_y), y_max * 10**margin_y)
+        y_min, y_max = min(all_ys), max(all_ys)
+        x_min, x_max = min(all_xs_plotted), max(all_xs_plotted)
+        ax.set_ylim(y_min * 10**(-0.5), y_max * 10**0.5)
         ax.set_xlim(x_min, x_max)
 
-    # X-axis scale
-    if x_scale_power == 1.0:
-        ax.set_xscale('log')
-    else:
-        fw, inv = _log_power_scale_funcs(x_scale_power)
-        ax.set_xscale('function', functions=(fw, inv))
-        # Place ticks at round sigma values within data range
-        candidate_ticks = np.array([0.001, 0.002, 0.005, 0.01, 0.02, 0.03, 0.05,
-                                     0.07, 0.1, 0.15, 0.2, 0.3, 0.5, 0.7, 1.0])
-        x_min_plot = min(all_xs_plotted) if all_xs_plotted else 0.01
-        x_max_plot = max(all_xs_plotted) if all_xs_plotted else 1.0
-        ticks_raw = candidate_ticks[(candidate_ticks >= x_min_plot) & (candidate_ticks <= x_max_plot)]
-        # Remove ticks that are too close in the transformed axis space
-        if len(ticks_raw) > 1:
-            t_vals = fw(ticks_raw)
-            total_span = t_vals[-1] - t_vals[0]
-            min_gap = 0.05 * total_span  # 5% of axis width minimum spacing
-            keep = [True] * len(ticks_raw)
-            for i in range(1, len(ticks_raw)):
-                if keep[i - 1] and (t_vals[i] - t_vals[i - 1]) < min_gap:
-                    keep[i] = False
-            ticks = ticks_raw[np.array(keep)]
-        else:
-            ticks = ticks_raw
-        ax.set_xticks(ticks)
-        ax.xaxis.set_major_formatter(mticker.FuncFormatter(
-            lambda v, _: (f'${v:.3g}$' if v < 0.1 else f'${v:.2g}$')
-        ))
-        ax.xaxis.set_minor_locator(mticker.NullLocator())
-
     ax.set_yscale('log')
+    ax.set_xscale('log')
     ax.set_xlabel(r"Noise Level $\sigma$", labelpad=8)
     if show_ylabel:
         ax.set_ylabel(r"Clean-Input Error $\mathcal{E}_{\mathrm{clean}}$", labelpad=8)
-    ax.set_title(rf"\textbf{{{title}}}", pad=10)
+    if label:
+        ax.set_title(rf"\textbf{{{label}}}", pad=8)
+    if all_xs_plotted:
+        x_min_tick = min(all_xs_plotted)
+        x_max_tick = max(all_xs_plotted)
+        ax.set_xticks([x_min_tick, x_max_tick])
+        def _log_fmt(v, _):
+            exp = int(np.floor(np.log10(v)))
+            mantissa = v / 10**exp
+            if abs(mantissa - 1.0) < 0.01:
+                return rf'$10^{{{exp}}}$'
+            return rf'${mantissa:.2g}{{\times}}10^{{{exp}}}$'
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(_log_fmt))
+        ax.xaxis.set_minor_locator(mticker.NullLocator())
     ax.grid(True, which='major', linestyle='-', linewidth=0.75, color='0.85')
     ax.grid(True, which='minor', linestyle=':', linewidth=0.5, color='0.9')
     ax.set_axisbelow(True)
     if show_legend:
-        ax.legend(title=r"\textbf{Instability Thresholds}", loc='upper left',
+        ax.legend(title=r"\textbf{Stability Thresholds}", loc='upper left',
                   frameon=True, fancybox=False, framealpha=0.95)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--maps', nargs='+', required=True,
-                        help='key=path pairs, e.g. kolmo=path/to/map.json')
-    parser.add_argument('--output', default='results/instability_thresholds_all.pdf')
-    parser.add_argument('--x_scale_power', type=float, default=2.0,
-                        help='Power p for -(−log10 σ)^p x-axis scale. '
-                             '1=standard log, 2=more emphasis on small σ.')
-    parser.add_argument('--no_flatness', action='store_true',
-                        help='Skip spectral flatness computation and use phi=1 '
-                             '(the white-error / L2 bound).')
+    parser.add_argument('--run', required=True, nargs='+',
+                        help='One or two run directories containing error_tracking_map.json')
+    parser.add_argument('--labels', nargs='+', default=None,
+                        help='Optional subplot titles for each run')
     args = parser.parse_args()
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-
-    # Parse key=path arguments, storing both the map data and the resolved file path
-    datasets = {}       # key -> map dict
-    map_paths = {}      # key -> resolved file path
-    for entry in args.maps:
-        key, path = entry.split('=', 1)
-        matches = sorted(glob(path))
-        if matches:
-            datasets[key] = load_map(matches[0])
-            map_paths[key] = matches[0]
-        else:
-            print(f"Warning: no file matched for {key}: {path}")
-
-    if not datasets:
-        print("No data loaded. Exiting.")
+    if len(args.run) > 2:
+        print("Error: at most 2 runs are supported")
         return
 
-    # Compute spectral flatness phi per dataset (single scalar — shape is sigma-invariant)
-    phi_dicts = {}
-    for key, map_path in map_paths.items():
-        if args.no_flatness:
-            phi_dicts[key] = None
-        else:
-            phi_dicts[key] = compute_spectral_flatness(map_path, datasets[key])
+    datasets = []
+    for run in args.run:
+        run_path = os.path.abspath(run)
+        map_path = os.path.join(run_path, 'error_tracking_map.json')
+        if not os.path.exists(map_path):
+            print(f"Error: no error_tracking_map.json found in {run_path}")
+            return
+        datasets.append(load_map(map_path))
 
     n = len(datasets)
-    fig, axes = plt.subplots(1, n, figsize=(6 * n, 4.5), squeeze=False)
+    fig, axes = plt.subplots(n, 1, figsize=(6, 4.5 * n), squeeze=False)
 
-    for idx, (key, data) in enumerate(datasets.items()):
-        title = DATASET_LABELS.get(key, key)
-        plot_single_dataset(
-            axes[0, idx], data, title,
-            show_ylabel=(idx == 0),
-            show_legend=(idx == 0),
-            x_scale_power=args.x_scale_power,
-            phi_dict=phi_dicts[key],
-        )
+    for i, (ax, data) in enumerate(zip(axes[:, 0], datasets)):
+        lbl = args.labels[i] if args.labels and i < len(args.labels) else None
+        plot_one(ax, data, label=lbl, show_ylabel=True, show_legend=True)
 
     plt.tight_layout()
-    plt.savefig(args.output, bbox_inches='tight')
-    print(f"Saved to {args.output}")
+    output = os.path.join(os.path.abspath(args.run[0]), 'instability_thresholds.pdf')
+    plt.savefig(output, bbox_inches='tight')
+    print(f"Saved to {output}")
     plt.close(fig)
 
 

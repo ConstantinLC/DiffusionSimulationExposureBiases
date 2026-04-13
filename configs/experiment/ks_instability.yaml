@@ -21,11 +21,11 @@ model:
   padding_mode: circular
 
 pretraining:
-  num_epochs: 1000
+  num_epochs: 500
   learning_rate_start: 1.0e-4
-  learning_rate_end: 1.0e-4
-  T_max: 1000
+  learning_rate_end: 1.0e-6
+  T_max: 500
   epoch_sampling_frequency: 50
   track_instability: true
   n_noise_samples: 10
-  validate_every_k: 10
+  validate_every_k: 50

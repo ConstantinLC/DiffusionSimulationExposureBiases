@@ -12,7 +12,7 @@ from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
-TAU_THRESHOLDS = [1.0, 1.05, 1.1, 1.15]
+TAU_THRESHOLDS = [1.01, 1.03, 1.05, 1.1, 1.15]
 
 
 def update_error_tracking_map(error_tracking_map, model, val_loader, device, epoch,
@@ -113,16 +113,9 @@ def update_error_tracking_map(error_tracking_map, model, val_loader, device, epo
             tau_str = str(tau)
             if tau - 0.01 < mean_ratio < tau + 0.01:
                 if tau_str not in error_tracking_map[sigma_str]:
-                    error_tracking_map[sigma_str][tau_str] = {
-                        'clean_error':   mean_clean,
-                        'ratio':         mean_ratio,
-                        'epoch':         epoch,
-                        'min_bias':      ratio_all[min_idx].item(),
-                        'min_bias_clean': clean_all[min_idx].item(),
-                        'max_bias':      ratio_all[max_idx].item(),
-                        'max_bias_clean': clean_all[max_idx].item(),
-                    }
-                break  # only record the smallest unrecorded threshold per epoch
+                    error_tracking_map[sigma_str][tau_str] = {'clean_errors': []}
+                error_tracking_map[sigma_str][tau_str]['clean_errors'].append(mean_clean)
+                break  # only record the smallest matching threshold per epoch
 
     return error_tracking_map
 

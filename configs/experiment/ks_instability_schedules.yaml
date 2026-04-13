@@ -1,0 +1,34 @@
+# @package _global_
+# Multi-schedule instability experiment for Kuramoto-Sivashinsky.
+# Trains a model to convergence with a log_uniform noise schedule over a
+# specified [sigma_min, sigma_max] range. Run 6 times with different bounds
+# via train_instability_schedules.sh.
+defaults:
+  - override /dataset: ks
+  - override /model: diffusion
+
+checkpoint_dir: ./checkpoints/KuramotoSivashinsky/instability_schedules/model
+
+data:
+  prediction_steps: 1
+  batch_size: 64
+  val_batch_size: 512
+
+model:
+  dimension: 1
+  dataSize: [64]
+  condChannels: 1
+  dataChannels: 1
+  diffSchedule: log_uniform
+  diffSteps: 20
+  padding_mode: circular
+  # sigma_min and sigma_max are overridden per-model from the training script
+
+pretraining:
+  num_epochs: 501
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-6
+  T_max: 501
+  epoch_sampling_frequency: 500
+  track_instability: false
+  validate_every_k: 100
