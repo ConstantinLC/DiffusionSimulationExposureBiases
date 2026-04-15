@@ -21,12 +21,16 @@ import logging
 import numpy as np
 
 import torch
+import wandb
+from torch import nn
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from src.config import DataConfig, ExperimentConfig
 from src.data.loaders import get_data_loaders
+from src.training.diffusion_trainer import train_diffusion_model
+from src.utils.general import get_run_dir_name
 from train import build_model
 
 log = logging.getLogger(__name__)
@@ -174,7 +178,7 @@ def main(cfg: DictConfig):
 
     # --- Data ---
     data_cfg = DataConfig(**OmegaConf.to_container(cfg.data, resolve=True))
-    train_loader, val_loader, _ = get_data_loaders(data_cfg)
+    train_loader, val_loader, traj_loader = get_data_loaders(data_cfg)
 
     # --- Build model skeleton (weights will be loaded from checkpoints) ---
     experiment_cfg = ExperimentConfig(**OmegaConf.to_container(cfg, resolve=True))
@@ -290,6 +294,64 @@ def main(cfg: DictConfig):
     for i, s in enumerate(schedule):
         log.info(f"  t={i}: sigma={s:.6f} (log10={np.log10(s):.3f})")
     log.info(f"Saved to {result_path}")
+
+    # -------------------------------------------------------------------
+    # Phase 3: train a fresh diffusion model on the greedy schedule
+    # -------------------------------------------------------------------
+    log.info(f"\n{'='*60}")
+    log.info("Phase 3: training diffusion model on greedy schedule")
+    log.info(f"{'='*60}")
+
+    # Merge pretraining params into training, and override model schedule
+    train_cfg = OmegaConf.merge(cfg, {
+        "training": OmegaConf.to_container(cfg.pretraining, resolve=True),
+        "model": {
+            "diffSchedule": "from_file",
+            "schedule_path": result_path,
+        },
+        "checkpoint_dir": os.path.join(run_dir, "greedy_trained"),
+    })
+
+    greedy_config = ExperimentConfig.from_hydra(train_cfg)
+    legacy = greedy_config.to_legacy_dict()
+
+    greedy_checkpoint_dir = greedy_config.checkpoint_dir
+    os.makedirs(greedy_checkpoint_dir, exist_ok=True)
+
+    # Save config
+    with open(os.path.join(greedy_checkpoint_dir, "config.json"), "w") as f:
+        json.dump(legacy, f, indent=4)
+
+    # W&B
+    run_name = get_run_dir_name(greedy_checkpoint_dir, greedy_config.model)
+    wandb.init(
+        project=greedy_config.wandb.project,
+        entity=greedy_config.wandb.entity,
+        name=run_name,
+        config=legacy,
+        mode="disabled" if cfg.get("debugging", False) else "online",
+    )
+
+    # Build fresh model on the greedy schedule
+    greedy_model = build_model(greedy_config)
+    greedy_model = greedy_model.to(device)
+
+    criterion = nn.MSELoss()
+
+    train_diffusion_model(
+        greedy_model,
+        train_loader,
+        val_loader,
+        traj_loader,
+        legacy["train_params"],
+        criterion,
+        legacy,
+        greedy_checkpoint_dir,
+        device=device,
+        is_master=True,
+    )
+
+    wandb.finish()
 
 
 if __name__ == '__main__':
