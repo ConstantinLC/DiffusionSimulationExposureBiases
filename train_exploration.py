@@ -19,6 +19,8 @@ Expected config keys (under `training`):
     eval_every_epoch     : int    (default 0)    -- evaluate B_own every N epochs within a pass (0=only at end)
     max_passes           : int    (default 30)   -- hard stop on number of passes
     n_eval_batches       : int    (default 30)   -- val batches used to estimate B_own
+    plateau_window       : int    (default 5)    -- number of mid-pass evals to look back for plateau detection
+    plateau_delta        : float  (default 0.005)-- min ratio drop over plateau_window evals to not be a plateau
     learning_rate_start  : float  (default 1e-4)
     learning_rate_end    : float  (default 1e-6)
 """
@@ -228,6 +230,8 @@ def main(cfg: DictConfig):
     eval_every_epoch    = int(tr.get('eval_every_epoch', 0))
     max_passes          = int(tr.get('max_passes', 30))
     n_eval_batches      = int(tr.get('n_eval_batches', 30))
+    plateau_window      = int(tr.get('plateau_window', 5))    # passes to look back
+    plateau_delta       = float(tr.get('plateau_delta', 0.005))  # min ratio drop to not plateau
 
     n_active_start      = int(tr.get('n_active_start', min(10, n_levels)))
     lr_start            = float(tr.get('learning_rate_start', 1e-4))
@@ -279,10 +283,11 @@ def main(cfg: DictConfig):
     # n_levels - n_active_start - 1 toward 0; -1 means nothing left to unlock)
     next_to_activate    = n_levels - n_active_start - 1
 
-    solved        = {}   # sigma_value (float) → {checkpoint, clean_error, ratio, pass}
+    solved        = {}   # sigma_value (float) → {checkpoint, clean_error, ratio, tau_min, stop_reason, pass}
     state_path    = os.path.join(checkpoint_dir, 'exploration_state.json')
     patience              = int(tr.get('exploration_patience', 5))  # passes without progress before stopping
     passes_without_progress = 0
+    ratio_history = {}   # sigma_val (float) → list of end-of-pass ratios
 
     # -----------------------------------------------------------------------
     for pass_idx in range(max_passes):
@@ -330,13 +335,35 @@ def main(cfg: DictConfig):
                 for sigma, ratio, ratio_2step, clean in zip(
                         sigmas_eval, mean_ratios, mean_ratios_2step, mean_cleans):
                     sigma_val = sigma.item()
-                    status = "SOLVED" if ratio <= tau else f"ratio={ratio:.3f}"
+                    if np.isnan(ratio):
+                        continue
+
+                    # Update mid-pass ratio history for plateau detection
+                    if sigma_val not in ratio_history:
+                        ratio_history[sigma_val] = []
+                    ratio_history[sigma_val].append(ratio)
+
+                    tau_solved = ratio <= tau
+
+                    hist = ratio_history[sigma_val]
+                    plateau_solved = (
+                        not tau_solved
+                        and len(hist) >= plateau_window
+                        and hist[-plateau_window] - hist[-1] < plateau_delta
+                    )
+
+                    if tau_solved:
+                        status = f"SOLVED (tau={tau})"
+                    elif plateau_solved:
+                        status = f"PLATEAU (tau_min={ratio:.4f})"
+                    else:
+                        status = f"ratio={ratio:.3f}"
+
                     log.info(f"  sigma={sigma_val:.5f}  B_own={ratio:.4f}  "
                              f"B_2step={ratio_2step:.4f}  "
                              f"E_clean={clean:.3e}  [{status}]")
-                    if np.isnan(ratio):
-                        continue
-                    if ratio <= tau and sigma_val not in solved:
+
+                    if (tau_solved or plateau_solved) and sigma_val not in solved:
                         ckpt_name = f"checkpoint_sigma_{sigma_val:.6f}.pth"
                         ckpt_path = os.path.join(checkpoint_dir, ckpt_name)
                         torch.save(model.state_dict(), ckpt_path)
@@ -344,6 +371,8 @@ def main(cfg: DictConfig):
                             'checkpoint' : ckpt_path,
                             'clean_error': clean,
                             'ratio'      : ratio,
+                            'tau_min'    : ratio,
+                            'stop_reason': 'tau' if tau_solved else 'plateau',
                             'pass'       : pass_idx + 1,
                         }
                         solved_this_pass.add(sigma_val)
@@ -376,7 +405,10 @@ def main(cfg: DictConfig):
             sigma_val = sigma.item()
             if np.isnan(ratio):
                 continue
-            status = "SOLVED" if ratio <= tau else f"ratio={ratio:.3f}"
+            already_solved = sigma_val in solved
+            status = (f"SOLVED (tau={tau})" if ratio <= tau
+                      else f"SOLVED (plateau, tau_min={solved[sigma_val]['tau_min']:.4f})" if already_solved
+                      else f"ratio={ratio:.3f}")
             log.info(f"  sigma={sigma_val:.5f}  B_own={ratio:.4f}  "
                      f"B_2step={ratio_2step:.4f}  "
                      f"E_clean={clean:.3e}  [{status}]")
@@ -389,6 +421,8 @@ def main(cfg: DictConfig):
                     'checkpoint' : ckpt_path,
                     'clean_error': clean,
                     'ratio'      : ratio,
+                    'tau_min'    : ratio,
+                    'stop_reason': 'tau',
                     'pass'       : pass_idx + 1,
                 }
                 solved_this_pass.add(sigma_val)
