@@ -23,6 +23,7 @@ class TrainingConfig(BaseModel):
     track_instability: bool = False
     n_noise_samples: int = 1
     validate_every_k: int = 10
+    exploration_run_dir: Optional[str] = None
 
 
 class DataConfig(BaseModel):

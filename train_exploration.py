@@ -46,10 +46,13 @@ log = logging.getLogger(__name__)
 # B_own evaluation
 # ---------------------------------------------------------------------------
 
-def compute_b_own(model, val_loader, device, n_batches=30):
+def compute_b_own(model, val_loader, device, n_batches=30, n_noise_samples=4):
     """
     Compute B_own(sigma_t) = mean_i [ E_own_i / E_clean_i ] for every noise
     level currently active in the model's schedule.
+
+    n_noise_samples independent noise draws are averaged per (sample, level)
+    before computing the ratio, reducing variance in the estimate.
 
     Returns
     -------
@@ -77,14 +80,34 @@ def compute_b_own(model, val_loader, device, n_batches=30):
             if spatial_dims is None:
                 spatial_dims = tuple(range(1, target.ndim))
 
-            _, ests_clean = model(conditioning=cond, data=target,
-                                  return_x0_estimate=True, input_type='clean')
-            _, ests_own   = model(conditioning=cond, data=target,
-                                  return_x0_estimate=True, input_type='own-pred')
+            # Accumulate MSE over multiple noise draws, then take the ratio
+            clean_acc = None  # (T, B)
+            own_acc   = None
 
-            for t_idx, (est_c, est_o) in enumerate(zip(ests_clean, ests_own)):
-                clean_mse = (est_c - target).pow(2).mean(dim=spatial_dims)
-                own_mse   = (est_o - target).pow(2).mean(dim=spatial_dims)
+            for _ in range(n_noise_samples):
+                _, ests_clean = model(conditioning=cond, data=target,
+                                      return_x0_estimate=True, input_type='clean')
+                _, ests_own   = model(conditioning=cond, data=target,
+                                      return_x0_estimate=True, input_type='own-pred')
+
+                clean_mses = torch.stack(
+                    [(est_c - target).pow(2).mean(dim=spatial_dims)
+                     for est_c in ests_clean]
+                )  # (T, B)
+                own_mses = torch.stack(
+                    [(est_o - target).pow(2).mean(dim=spatial_dims)
+                     for est_o in ests_own]
+                )  # (T, B)
+
+                clean_acc = clean_mses if clean_acc is None else clean_acc + clean_mses
+                own_acc   = own_mses   if own_acc   is None else own_acc   + own_mses
+
+            clean_acc /= n_noise_samples
+            own_acc   /= n_noise_samples
+
+            for t_idx in range(T):
+                clean_mse = clean_acc[t_idx]
+                own_mse   = own_acc[t_idx]
                 valid     = clean_mse > 0
                 ratio     = (own_mse / clean_mse.clamp(min=1e-12))[valid]
                 all_clean[t_idx].append(clean_mse[valid].cpu())
@@ -228,6 +251,7 @@ def main(cfg: DictConfig):
     eval_every_epoch    = int(tr.get('eval_every_epoch', 0))
     max_passes          = int(tr.get('max_passes', 30))
     n_eval_batches      = int(tr.get('n_eval_batches', 30))
+    n_noise_samples     = int(tr.get('n_noise_samples', 4))   # noise draws per sample for B_own
 
     n_active_start      = int(tr.get('n_active_start', min(10, n_levels)))
     lr_start            = float(tr.get('learning_rate_start', 1e-4))
@@ -321,7 +345,8 @@ def main(cfg: DictConfig):
             if do_mid_eval:
                 log.info(f"  -- mid-pass eval at epoch {epoch + 1} --")
                 sigmas_eval, mean_ratios, mean_cleans = compute_b_own(
-                    model, val_loader, device, n_batches=n_eval_batches
+                    model, val_loader, device, n_batches=n_eval_batches,
+                    n_noise_samples=n_noise_samples,
                 )
                 _, mean_ratios_2step, _ = compute_b_2step(
                     model, val_loader, device, n_batches=n_eval_batches

@@ -29,6 +29,8 @@ training:
   best_log_sigma: null
   channels_per_frame: null
   first_ar_step_noising_step_limit: null
+  exploration_run_dir: null
+  end_to_end: false
 
 loss:
   name: mse

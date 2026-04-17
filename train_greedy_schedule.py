@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 def compute_two_step_bias_cross_checkpoint(
     model, checkpoint_high, checkpoint_low,
     sigma_high, sigma_low,
-    val_loader, device, n_batches=30,
+    val_loader, device, n_batches=30, n_noise_samples=1,
 ):
     """
     Compute B^(2S)_{theta*(sigma_high), theta*(sigma_low)}(sigma_low, sigma_high).
@@ -53,6 +53,7 @@ def compute_two_step_bias_cross_checkpoint(
 
     The model schedule is set to [sigma_low, sigma_high] (indices 0 and 1).
     Checkpoint swaps happen once per phase (not per batch) for efficiency.
+    n_noise_samples independent noise draws are averaged per (sample, phase).
     """
     model.eval()
     schedule = torch.tensor([sigma_low, sigma_high], dtype=torch.float32)
@@ -73,8 +74,8 @@ def compute_two_step_bias_cross_checkpoint(
     sigmas = model.sqrtOneMinusAlphasCumprod.squeeze()
     sqrt_alpha = model.sqrtAlphasCumprod.squeeze()
 
-    # Store intermediate x0 estimates and associated noise seeds
-    x0_hats = []
+    # For each batch, store n_noise_samples x0_hat draws
+    x0_hats = []   # list of (n_noise_samples, N, ...) tensors
     targets_list = []
     conds_list = []
     spatial_dims = None
@@ -94,14 +95,16 @@ def compute_two_step_bias_cross_checkpoint(
             N = target.shape[0]
             t_high = torch.full((N,), IDX_HIGH, device=device, dtype=torch.long)
 
-            eps_high = torch.randn_like(target)
-            y_noisy_high = sqrt_alpha[t_high] * target + sigmas[t_high] * eps_high
+            x0_hat_acc = torch.zeros_like(target)
+            for _ in range(n_noise_samples):
+                eps_high = torch.randn_like(target)
+                y_noisy_high = sqrt_alpha[t_high] * target + sigmas[t_high] * eps_high
+                inp_high = torch.cat((cond, y_noisy_high), dim=1)
+                pred_noise_high = model.unet(inp_high, t_high)[:, cond.shape[1]:]
+                x0_hat_acc += (y_noisy_high - sigmas[t_high] * pred_noise_high) / sqrt_alpha[t_high]
+            x0_hat_acc /= n_noise_samples
 
-            inp_high = torch.cat((cond, y_noisy_high), dim=1)
-            pred_noise_high = model.unet(inp_high, t_high)[:, cond.shape[1]:]
-            x0_hat = (y_noisy_high - sigmas[t_high] * pred_noise_high) / sqrt_alpha[t_high]
-
-            x0_hats.append(x0_hat.cpu())
+            x0_hats.append(x0_hat_acc.cpu())
             targets_list.append(target.cpu())
             conds_list.append(cond.cpu())
 
@@ -124,25 +127,27 @@ def compute_two_step_bias_cross_checkpoint(
             N = target.shape[0]
             t_low = torch.full((N,), IDX_LOW, device=device, dtype=torch.long)
 
-            # Re-noise x0_hat to sigma_low
-            eps_low = torch.randn_like(target)
-            y_noisy_low = sqrt_alpha[t_low] * x0_hat + sigmas[t_low] * eps_low
+            twostep_acc = torch.zeros(N, device=device)
+            clean_acc = torch.zeros(N, device=device)
+            for _ in range(n_noise_samples):
+                # Re-noise x0_hat to sigma_low
+                eps_low = torch.randn_like(target)
+                y_noisy_low = sqrt_alpha[t_low] * x0_hat + sigmas[t_low] * eps_low
+                inp_low = torch.cat((cond, y_noisy_low), dim=1)
+                pred_noise_low = model.unet(inp_low, t_low)[:, cond.shape[1]:]
+                x0_final = (y_noisy_low - sigmas[t_low] * pred_noise_low) / sqrt_alpha[t_low]
+                twostep_acc += (x0_final - target).pow(2).mean(dim=spatial_dims)
 
-            inp_low = torch.cat((cond, y_noisy_low), dim=1)
-            pred_noise_low = model.unet(inp_low, t_low)[:, cond.shape[1]:]
-            x0_final = (y_noisy_low - sigmas[t_low] * pred_noise_low) / sqrt_alpha[t_low]
+                # Clean error at sigma_low
+                eps_clean = torch.randn_like(target)
+                y_clean_low = sqrt_alpha[t_low] * target + sigmas[t_low] * eps_clean
+                inp_clean = torch.cat((cond, y_clean_low), dim=1)
+                pred_noise_clean = model.unet(inp_clean, t_low)[:, cond.shape[1]:]
+                x0_clean = (y_clean_low - sigmas[t_low] * pred_noise_clean) / sqrt_alpha[t_low]
+                clean_acc += (x0_clean - target).pow(2).mean(dim=spatial_dims)
 
-            twostep_mse = (x0_final - target).pow(2).mean(dim=spatial_dims)
-            all_twostep_mse.append(twostep_mse.cpu())
-
-            # Clean error at sigma_low
-            eps_clean = torch.randn_like(target)
-            y_clean_low = sqrt_alpha[t_low] * target + sigmas[t_low] * eps_clean
-            inp_clean = torch.cat((cond, y_clean_low), dim=1)
-            pred_noise_clean = model.unet(inp_clean, t_low)[:, cond.shape[1]:]
-            x0_clean = (y_clean_low - sigmas[t_low] * pred_noise_clean) / sqrt_alpha[t_low]
-            clean_mse = (x0_clean - target).pow(2).mean(dim=spatial_dims)
-            all_clean_mse.append(clean_mse.cpu())
+            all_twostep_mse.append((twostep_acc / n_noise_samples).cpu())
+            all_clean_mse.append((clean_acc / n_noise_samples).cpu())
 
     mean_twostep = torch.cat(all_twostep_mse).mean().item()
     mean_clean = torch.cat(all_clean_mse).mean().item()
@@ -161,6 +166,7 @@ def main(cfg: DictConfig):
     device = torch.device(tr.get('device', 'cuda'))
     tau = float(tr.get('tau', 1.05))
     n_eval_batches = int(tr.get('n_eval_batches', 30))
+    n_noise_samples = int(tr.get('n_noise_samples', 1))
     run_dir = str(tr.exploration_run_dir)
 
     # --- Load exploration state ---
@@ -222,7 +228,7 @@ def main(cfg: DictConfig):
 
     schedule = [available_sigmas[0]]
     log.info(f"\n{'='*60}")
-    log.info(f"Greedy schedule construction  |  tau={tau}")
+    log.info(f"Greedy schedule construction  |  tau={tau}  n_noise_samples={n_noise_samples}")
     log.info(f"{'='*60}")
     log.info(f"sigma_0 = {schedule[0]:.6f}  (minimum solved level)")
 
@@ -246,6 +252,7 @@ def main(cfg: DictConfig):
                 model, ckpt_high, ckpt_low,
                 sigma_candidate, sigma_t,
                 val_loader, device, n_batches=n_eval_batches,
+                n_noise_samples=n_noise_samples,
             )
             log.info(f"  Eval: sigma_t={sigma_t:.6f} -> sigma'={sigma_candidate:.6f}  "
                      f"B^(2S)={bias:.4f}  E_clean={clean_err:.3e}  "

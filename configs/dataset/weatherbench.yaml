@@ -25,7 +25,7 @@ model:
 pretraining:
   num_epochs: 101
   learning_rate_start: 1.0e-4
-  learning_rate_end: 1.0e-6
+  learning_rate_end: 1.0e-4
   T_max: 101
   device: cuda
   epoch_sampling_frequency: 50
