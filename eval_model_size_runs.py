@@ -5,6 +5,8 @@ KS validation set and plot inference MSE vs noise level.
 Usage:
     python eval_model_size_runs.py --manifest model_size_manifest.json \\
         [--device cuda] [--output_dir results/model_size/]
+    python eval_model_size_runs.py --runs_dir checkpoints/KS/model_size \\
+        [--device cuda] [--output_dir results/model_size/]
 """
 
 import os, sys, json, argparse
@@ -50,17 +52,45 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def manifest_from_runs_dir(runs_dir):
+    """Build manifest from <runs_dir>/size_<N>/run_<K>/greedy_trained/ layout."""
+    manifest = {}
+    for entry in sorted(os.listdir(runs_dir)):
+        if not entry.startswith("size_"):
+            continue
+        size_str = entry[len("size_"):]
+        size_dir = os.path.join(runs_dir, entry)
+        runs = []
+        for r in sorted(os.listdir(size_dir)):
+            run_dir = os.path.join(size_dir, r)
+            if not os.path.isdir(run_dir):
+                continue
+            greedy_trained = os.path.join(run_dir, "greedy_trained")
+            ckpt = greedy_trained if os.path.isdir(greedy_trained) else run_dir
+            runs.append(ckpt)
+        if runs:
+            manifest[size_str] = runs
+    return manifest
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", required=True,
-                        help="model_size_manifest.json from run_model_size.sh")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--manifest",
+                       help="model_size_manifest.json from run_model_size.sh")
+    group.add_argument("--runs_dir",
+                       help="Directory with size_<N>/run_<K>/ layout")
     parser.add_argument("--device",     default="cuda")
     parser.add_argument("--output_dir", default="results/model_size")
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    with open(args.manifest) as f:
-        manifest = json.load(f)  # {dataSize_str: [ckpt_dir, ...]}
+    if args.runs_dir:
+        manifest = manifest_from_runs_dir(args.runs_dir)
+        print(f"Discovered runs_dir: {args.runs_dir}")
+    else:
+        with open(args.manifest) as f:
+            manifest = json.load(f)  # {dataSize_str: [ckpt_dir, ...]}
 
     sizes = sorted(manifest.keys(), key=lambda x: int(x))
     print(f"Manifest loaded: {len(sizes)} model size(s): {sizes}")
@@ -69,7 +99,6 @@ def main():
     print("--- Loading data ---")
     val_loader = build_val_loader(first_ckpt)
 
-    N_GRID = 200
     records = {}
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -96,10 +125,8 @@ def main():
 
         print(f"  dataSize={size_str}  n_params={n_params:,}")
 
-        # Interpolate all seeds onto a common log-spaced grid
-        grid_min = max(min(nl.min() for nl in seed_nls), 1e-10)
-        grid_max = min(nl.max() for nl in seed_nls)
-        grid = np.logspace(np.log10(grid_min), np.log10(grid_max), N_GRID)
+        # Use first seed's noise levels as the grid; interpolate other seeds onto it
+        grid = seed_nls[0]
 
         def interp(nl, vals):
             return np.interp(np.log10(grid), np.log10(np.maximum(nl, 1e-30)), vals)

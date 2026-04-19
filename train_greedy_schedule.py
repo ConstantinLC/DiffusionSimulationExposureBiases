@@ -164,6 +164,10 @@ def main(cfg: DictConfig):
 
     tr = cfg.training
     device = torch.device(tr.get('device', 'cuda'))
+    seed = tr.get('seed', None)
+    if seed is not None:
+        torch.manual_seed(int(seed))
+        np.random.seed(int(seed))
     tau = float(tr.get('tau', 1.05))
     n_eval_batches = int(tr.get('n_eval_batches', 30))
     n_noise_samples = int(tr.get('n_noise_samples', 1))

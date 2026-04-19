@@ -1,0 +1,35 @@
+# @package _global_
+# Phase 1: Exploration for WeatherBench
+defaults:
+  - override /dataset: weatherbench
+  - override /model: diffusion
+
+checkpoint_dir: ./checkpoints/WeatherBench/exploration
+
+model:
+  diffSchedule: linear
+  diffSteps: 40
+
+training:
+  device: cuda
+  num_epochs: 101
+  T_max: 101
+  tau: 1.05
+  log_sigma_min: -3.0
+  log_sigma_max: -0.0001
+  n_exploration_levels: 100
+  epochs_per_pass: 100
+  eval_every_epoch: 5
+  max_passes: 1
+  n_eval_batches: 30
+  exploration_run_dir: ""
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-4
+
+pretraining:
+  num_epochs: 101
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-4
+  T_max: 101
+  device: cuda
+  epoch_sampling_frequency: 50

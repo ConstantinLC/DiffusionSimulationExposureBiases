@@ -8,9 +8,13 @@ Multi-seed usage (from run_tau_seeds.sh manifest):
     python eval_tau_runs.py --manifest tau_seeds_manifest.json \\
         [--device cuda] [--output_dir results/tau_seeds/]
 
-In manifest mode the script evaluates all seeds per tau, computes per-seed
-DW-bias metrics, then averages across seeds (via interpolation onto a shared
-log-spaced grid) and plots mean ± std for each tau.
+Directory usage (auto-discover tau_<V>/run_<K>/ layout):
+    python eval_tau_runs.py --runs_dir checkpoints/KS/tau_grid \\
+        [--device cuda] [--output_dir results/tau_seeds/]
+
+In manifest/runs_dir mode the script evaluates all seeds per tau, computes
+per-seed DW-bias metrics, then averages across seeds (via interpolation onto
+a shared log-spaced grid) and plots mean ± std for each tau.
 """
 
 import os, sys, json, argparse
@@ -43,7 +47,27 @@ RUNS = {
 }
 
 TAU_COLORS = ["#e41a1c", "#377eb8", "#4daf4a", "#ff7f00", "#984ea3"]
-N_GRID = 200  # points in the shared log-spaced interpolation grid
+
+
+def manifest_from_runs_dir(runs_dir):
+    """Build manifest from <runs_dir>/tau_<V>/run_<K>/greedy_trained/ layout."""
+    manifest = {}
+    for entry in sorted(os.listdir(runs_dir)):
+        if not entry.startswith("tau_"):
+            continue
+        tau_str = entry[len("tau_"):]
+        tau_dir = os.path.join(runs_dir, entry)
+        runs = []
+        for r in sorted(os.listdir(tau_dir)):
+            run_dir = os.path.join(tau_dir, r)
+            if not os.path.isdir(run_dir):
+                continue
+            greedy_trained = os.path.join(run_dir, "greedy_trained")
+            ckpt = greedy_trained if os.path.isdir(greedy_trained) else run_dir
+            runs.append(ckpt)
+        if runs:
+            manifest[tau_str] = runs
+    return manifest
 
 
 # ── data loader ────────────────────────────────────────────────────────────────
@@ -219,13 +243,21 @@ def main():
         help="Path to tau_seeds_manifest.json produced by run_tau_seeds.sh. "
              "When provided, evaluates all seeds per tau and averages results.",
     )
+    parser.add_argument(
+        "--runs_dir", default=None,
+        help="Directory with tau_<V>/run_<K>/ layout; auto-builds manifest.",
+    )
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # ── manifest mode ──────────────────────────────────────────────────────────
-    if args.manifest:
-        with open(args.manifest) as f:
-            manifest = json.load(f)  # {tau_str: [ckpt_dir, ...]}
+    # ── manifest / runs_dir mode ───────────────────────────────────────────────
+    if args.runs_dir or args.manifest:
+        if args.runs_dir:
+            manifest = manifest_from_runs_dir(args.runs_dir)
+            print(f"Discovered runs_dir: {args.runs_dir}")
+        else:
+            with open(args.manifest) as f:
+                manifest = json.load(f)  # {tau_str: [ckpt_dir, ...]}
 
         print(f"Manifest loaded: {len(manifest)} tau value(s)")
 
@@ -254,11 +286,8 @@ def main():
                 del model
                 torch.cuda.empty_cache()
 
-            # Common interpolation grid spanning all seeds' noise level ranges
-            all_nl = [np.array(r["noise_levels"]) for r in seed_results]
-            grid_min = max(min(nl.min() for nl in all_nl), 1e-10)
-            grid_max = min(nl.max() for nl in all_nl)
-            grid = np.logspace(np.log10(grid_min), np.log10(grid_max), N_GRID)
+            # Use first seed's actual noise levels as the interpolation grid
+            grid = np.array(seed_results[0]["noise_levels"])
 
             averaged = average_seeds(seed_results, grid)
 

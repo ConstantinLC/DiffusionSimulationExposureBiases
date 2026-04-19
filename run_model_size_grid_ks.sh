@@ -17,8 +17,8 @@
 set -euo pipefail
 
 TAU="${TAU:-1.05}"
-read -ra SIZES <<< "${DATASIZES:-16 32}" # 64 128
-N_SEEDS="${N_SEEDS:-1}"
+read -ra SIZES <<< "${DATASIZES:-64 128}" # 64 128 16 32
+N_SEEDS="${N_SEEDS:-3}"
 BASE="./checkpoints/KuramotoSivashinsky/model_size"
 LOGDIR="./logs/model_size"
 MANIFEST="./model_size_manifest.json"
@@ -83,6 +83,7 @@ for seed in $(seq 1 "$N_SEEDS"); do
         python train_exploration.py \
             +experiment=ks_exploration \
             training.tau="$TAU" \
+            training.seed="$seed" \
             "model.dataSize=[$size]" \
             checkpoint_dir="$size_base" \
             >"$logfile" 2>&1 &
@@ -118,6 +119,7 @@ for seed in $(seq 1 "$N_SEEDS"); do
             +experiment=ks_exploration \
             "training.exploration_run_dir=$run_dir" \
             training.tau="$TAU" \
+            training.seed="$seed" \
             "model.dataSize=[$size]" \
             >"$logfile" 2>&1 &
         greedy_pids[$size]=$!

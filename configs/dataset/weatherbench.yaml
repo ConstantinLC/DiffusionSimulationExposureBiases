@@ -4,7 +4,7 @@ defaults:
 
 data:
   dataset_name: WeatherBench
-  data_path: /mnt/SSD2/data/weatherbench   # path to WeatherBench 1 directory (containing geopotential_500/, temperature_850/, ...)
+  data_path: /mnt/SSD2/constantin/data/weatherbench   # path to WeatherBench 1 directory (containing geopotential_500/, temperature_850/, ...)
   variables: [z500, t850]
   resolution: 64
   frames_per_step: 1        # stride in 6-hourly timesteps (1 = 6h, 4 = 24h)

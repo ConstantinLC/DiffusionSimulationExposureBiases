@@ -243,6 +243,10 @@ def main(cfg: DictConfig):
     tr = cfg.training
     torch.set_num_threads(int(tr.get('num_cpu_threads', 4)))
     device              = torch.device(tr.get('device', 'cuda'))
+    seed = tr.get('seed', None)
+    if seed is not None:
+        torch.manual_seed(int(seed))
+        np.random.seed(int(seed))
     tau                 = float(tr.get('tau', 1.05))
     log_sigma_min       = float(tr.get('log_sigma_min', -3.0))
     log_sigma_max       = float(tr.get('log_sigma_max', -0.0001))

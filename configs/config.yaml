@@ -31,6 +31,7 @@ training:
   first_ar_step_noising_step_limit: null
   exploration_run_dir: null
   end_to_end: false
+  seed: null
 
 loss:
   name: mse
