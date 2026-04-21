@@ -19,7 +19,7 @@ from src.models.dilresnet import DilatedResNet
 from src.models.fno import FNO
 from src.training.diffusion_trainer import train_diffusion_model, train_diffusion_model_multisteps
 from src.training.unet_trainer import train_unet, train_unet_multisteps
-from src.utils.general import count_parameters, get_run_dir_name
+from src.utils.general import count_parameters, get_model_run_dir
 from src.utils.multigpu import setup_ddp, cleanup
 
 
@@ -155,9 +155,9 @@ def main(cfg: DictConfig) -> None:
     run_name = "debug"
     checkpoint_dir = None
     if is_master:
-        run_name = get_run_dir_name(config.checkpoint_dir, config.model)
+        _, run_name, _ckpt = get_model_run_dir(config.checkpoint_dir, config.model, config.data.prediction_steps)
         if not config.debugging:
-            checkpoint_dir = os.path.join(config.checkpoint_dir, run_name)
+            checkpoint_dir = _ckpt
             os.makedirs(checkpoint_dir, exist_ok=True)
             print(f"Artifacts for this run will be saved in: {checkpoint_dir}")
         else:

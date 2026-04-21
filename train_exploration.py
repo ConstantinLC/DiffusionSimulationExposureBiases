@@ -243,10 +243,10 @@ def main(cfg: DictConfig):
     tr = cfg.training
     torch.set_num_threads(int(tr.get('num_cpu_threads', 4)))
     device              = torch.device(tr.get('device', 'cuda'))
-    seed = tr.get('seed', None)
+    seed = tr.seed
     if seed is not None:
-        torch.manual_seed(int(seed))
-        np.random.seed(int(seed))
+        torch.manual_seed(seed)
+        np.random.seed(seed)
     tau                 = float(tr.get('tau', 1.05))
     log_sigma_min       = float(tr.get('log_sigma_min', -3.0))
     log_sigma_max       = float(tr.get('log_sigma_max', -0.0001))
@@ -261,11 +261,17 @@ def main(cfg: DictConfig):
     lr_start            = float(tr.get('learning_rate_start', 1e-4))
     lr_end              = float(tr.get('learning_rate_end', 1e-6))
     checkpoint_dir      = cfg.checkpoint_dir
-    run_idx = 0
-    while os.path.exists(os.path.join(checkpoint_dir, f'run_{run_idx}')):
-        run_idx += 1
-    checkpoint_dir = os.path.join(checkpoint_dir, f'run_{run_idx}')
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    # If pointing at an incomplete run dir (no exploration_state.json), reuse it in place.
+    # Otherwise auto-increment to find the next available run_N.
+    state_exists = os.path.exists(os.path.join(checkpoint_dir, 'exploration_state.json'))
+    if os.path.basename(checkpoint_dir).startswith('run_') and not state_exists:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+    else:
+        run_idx = 0
+        while os.path.exists(os.path.join(checkpoint_dir, f'run_{run_idx}')):
+            run_idx += 1
+        checkpoint_dir = os.path.join(checkpoint_dir, f'run_{run_idx}')
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
     # --- Cosine exploration schedule (dense near both extremes) ---
     # Map uniform t in [0, 1] through cosine to cluster points near
@@ -311,6 +317,8 @@ def main(cfg: DictConfig):
     state_path    = os.path.join(checkpoint_dir, 'exploration_state.json')
     patience              = int(tr.get('exploration_patience', 5))  # passes without progress before stopping
     passes_without_progress = 0
+    stall_patience        = int(tr.get('stall_patience', 3))  # mid-pass checks with no B_own decrease → force-solve
+    b_own_history         = {}   # sigma_val (float) → list of recent mid-pass B_own values
 
     # -----------------------------------------------------------------------
     for pass_idx in range(max_passes):
@@ -376,9 +384,35 @@ def main(cfg: DictConfig):
                             'pass'       : pass_idx + 1,
                         }
                         solved_this_pass.add(sigma_val)
+                        b_own_history.pop(sigma_val, None)
                         global_idx = (all_sigmas - torch.tensor(sigma_val)).abs().argmin().item()
                         active_mask[global_idx] = False
                         newly_solved_mid += 1
+                    elif sigma_val not in solved:
+                        # Track B_own history to detect stalled high-noise levels
+                        hist = b_own_history.setdefault(sigma_val, [])
+                        hist.append(ratio)
+                        if (len(hist) >= stall_patience
+                                and all(hist[-stall_patience + i] <= hist[-stall_patience + i + 1]
+                                        for i in range(stall_patience - 1))):
+                            log.info(f"  sigma={sigma_val:.5f} stalled (no B_own decrease over "
+                                     f"{stall_patience} mid-pass checks, last={ratio:.4f}). "
+                                     f"Force-solving with threshold {ratio:.4f}.")
+                            ckpt_name = f"checkpoint_sigma_{sigma_val:.6f}.pth"
+                            ckpt_path = os.path.join(checkpoint_dir, ckpt_name)
+                            torch.save(model.state_dict(), ckpt_path)
+                            solved[sigma_val] = {
+                                'checkpoint'     : ckpt_path,
+                                'clean_error'    : clean,
+                                'ratio'          : ratio,
+                                'pass'           : pass_idx + 1,
+                                'stall_threshold': ratio,
+                            }
+                            solved_this_pass.add(sigma_val)
+                            b_own_history.pop(sigma_val, None)
+                            global_idx = (all_sigmas - torch.tensor(sigma_val)).abs().argmin().item()
+                            active_mask[global_idx] = False
+                            newly_solved_mid += 1
                 if newly_solved_mid > 0:
                     n_unlocked_mid = 0
                     for _ in range(newly_solved_mid):

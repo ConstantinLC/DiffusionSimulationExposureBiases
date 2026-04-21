@@ -62,6 +62,8 @@ def manifest_from_runs_dir(runs_dir):
             run_dir = os.path.join(tau_dir, r)
             if not os.path.isdir(run_dir):
                 continue
+            if not os.path.isdir(os.path.join(run_dir, "greedy_schedule")):
+                continue
             greedy_trained = os.path.join(run_dir, "greedy_trained")
             ckpt = greedy_trained if os.path.isdir(greedy_trained) else run_dir
             runs.append(ckpt)
@@ -161,6 +163,9 @@ def plot_single_runs(all_results, output_dir):
     out = os.path.join(output_dir, "tau_runs_noise_vs_error.pdf")
     plt.savefig(out, bbox_inches="tight")
     print(f"Plot saved → {out}")
+    out_png = os.path.join(output_dir, "tau_runs_noise_vs_error.png")
+    plt.savefig(out_png, bbox_inches="tight", dpi=150)
+    print(f"Plot saved → {out_png}")
     plt.show()
 
     data_out = os.path.join(output_dir, "tau_runs_errors.json")
@@ -176,11 +181,7 @@ def plot_averaged(tau_averaged, output_dir):
     tau_averaged: {tau_str: {"grid": [...], "averaged": {...}, "color": ...,
                               "tau": float, "seed_results": [...]}}
     """
-    fig, ax_err = plt.subplots(figsize=(8, 5))
-    fig.suptitle(
-        "Greedy-trained models (averaged over seeds): noise level vs one-step error",
-        fontsize=13,
-    )
+    fig, ax_err = plt.subplots(figsize=(5, 5))
 
     records = {}
     for tau_str, info in tau_averaged.items():
@@ -190,40 +191,51 @@ def plot_averaged(tau_averaged, output_dir):
         tau     = info["tau"]
         n_seeds = len(info["seed_results"])
 
-        own_mean = avg["mse_clean_own_pred"]["mean"]
-        own_std  = avg["mse_clean_own_pred"]["std"]
+        scores = [r["bias"]["mse_clean_own_pred"][0] for r in info["seed_results"]]
+        order = np.argsort(scores)
+        pick = order[1] if len(order) > 1 else order[0]
+        seed_res = info["seed_results"][pick]
+        nl_seed = np.array(seed_res["noise_levels"])
+        seed_own = np.array(seed_res["bias"]["mse_clean_own_pred"])
+        val0 = seed_own[0]
+        ax_err.semilogy(nl_seed, seed_own, color=c, linewidth=2.0,
+                        linestyle="-", alpha=0.9, label=f"τ={tau**0.5:.4f}  [{val0:.2e}]")
 
-        for seed_own in avg["mse_clean_own_pred"]["all"]:
-            ax_err.semilogy(grid, seed_own, color=c, linewidth=0.8,
-                            linestyle="-", alpha=0.25)
-
-        ax_err.semilogy(grid, own_mean, color=c, linewidth=2.0, linestyle="-",
-                        label=f"τ={tau} (n={n_seeds})")
-        ax_err.fill_between(grid,
-                             np.maximum(own_mean - own_std, 1e-30),
-                             own_mean + own_std,
-                             color=c, alpha=0.15)
-
+        seed_results = info["seed_results"]
+        nl0      = np.array([r["noise_levels"][0]                    for r in seed_results])
+        clean0   = np.array([r["bias"]["mse_clean"][0]               for r in seed_results])
+        infer0   = np.array([r["bias"]["mse_clean_own_pred"][0]      for r in seed_results])
         records[tau_str] = {
             "tau": tau,
-            "noise_levels": grid.tolist(),
-            "mse_clean_mean": avg["mse_clean"]["mean"].tolist(),
-            "mse_clean_std":  avg["mse_clean"]["std"].tolist(),
-            "mse_inference_mean": own_mean.tolist(),
-            "mse_inference_std":  own_std.tolist(),
+            "noise_levels":      float(np.mean(nl0)),
+            "mse_clean_mean":    float(np.mean(clean0)),
+            "mse_clean_std":     float(np.std(clean0)),
+            "mse_inference_mean": float(np.mean(infer0)),
+            "mse_inference_std":  float(np.std(infer0)),
+            "runs": [
+                {
+                    "ckpt_dir": r["ckpt_dir"],
+                    "noise_levels": r["noise_levels"],
+                    "mse_clean": r["bias"]["mse_clean"],
+                    "mse_inference": r["bias"]["mse_clean_own_pred"],
+                }
+                for r in info["seed_results"]
+            ],
         }
 
     ax_err.set_xscale("log")
-    ax_err.set_xlabel(r"Noise level $\sigma$")
-    ax_err.set_ylabel("MSE (inference)")
-    ax_err.set_title("One-step inference error  (shading = ±1 std)")
+    ax_err.set_xlabel(r"Noise level $\sigma$", fontsize=14)
+    ax_err.set_ylabel("MSE (inference)", fontsize=14)
     ax_err.grid(True, which="both", alpha=0.3)
-    ax_err.legend(fontsize=8)
+    ax_err.legend(fontsize=12)
 
     plt.tight_layout()
     out = os.path.join(output_dir, "tau_seeds_noise_vs_error.pdf")
     plt.savefig(out, bbox_inches="tight")
     print(f"Plot saved  → {out}")
+    out_png = os.path.join(output_dir, "tau_seeds_noise_vs_error.png")
+    plt.savefig(out_png, bbox_inches="tight", dpi=150)
+    print(f"Plot saved  → {out_png}")
     plt.show()
 
     data_out = os.path.join(output_dir, "tau_seeds_errors.json")

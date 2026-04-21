@@ -22,18 +22,18 @@ model:
   padding_mode: circular
 
 pretraining:
-  num_epochs: 1001
+  num_epochs: 2001
   learning_rate_start: 1.0e-4
   learning_rate_end: 1.0e-6
-  T_max: 1001
+  T_max: 2001
   device: cuda
   epoch_sampling_frequency: 50
 
 finetuning:
-  num_epochs: 1001
+  num_epochs: 101
   learning_rate_start: 1.0e-4
   learning_rate_end: 1.0e-6
-  T_max: 1001
+  T_max: 101
   device: cuda
   epoch_sampling_frequency: 50
 

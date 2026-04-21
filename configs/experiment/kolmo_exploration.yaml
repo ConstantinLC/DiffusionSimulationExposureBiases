@@ -23,15 +23,23 @@ model:
 
 training:
   device: cuda
-  num_epochs: 1000   # max_passes * epochs_per_pass (not used directly, satisfies schema)
-  T_max: 1000
+  num_epochs: 1001   # max_passes * epochs_per_pass (not used directly, satisfies schema)
+  T_max: 1001
   tau: 1.05
   log_sigma_min: -3.0
   log_sigma_max: -0.0001
-  n_exploration_levels: 100
+  n_exploration_levels: 40
   epochs_per_pass: 1000
   eval_every_epoch: 50
   max_passes: 1
   n_eval_batches: 30
   learning_rate_start: 1.0e-4
   learning_rate_end: 1.0e-6
+
+pretraining:
+  num_epochs: 1001
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-6
+  T_max: 1001
+  device: cuda
+  epoch_sampling_frequency: 50

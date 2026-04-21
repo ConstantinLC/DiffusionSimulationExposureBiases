@@ -71,8 +71,8 @@ def compute_two_step_bias_cross_checkpoint(
     _load_weights(checkpoint_high)
     model = model.to(device)
 
-    sigmas = model.sqrtOneMinusAlphasCumprod.squeeze()
-    sqrt_alpha = model.sqrtAlphasCumprod.squeeze()
+    sigmas = model.sqrtOneMinusAlphasCumprod
+    sqrt_alpha = model.sqrtAlphasCumprod
 
     # For each batch, store n_noise_samples x0_hat draws
     x0_hats = []   # list of (n_noise_samples, N, ...) tensors
@@ -112,8 +112,8 @@ def compute_two_step_bias_cross_checkpoint(
     _load_weights(checkpoint_low)
     model = model.to(device)
 
-    sigmas = model.sqrtOneMinusAlphasCumprod.squeeze()
-    sqrt_alpha = model.sqrtAlphasCumprod.squeeze()
+    sigmas = model.sqrtOneMinusAlphasCumprod
+    sqrt_alpha = model.sqrtAlphasCumprod
 
     all_clean_mse = []
     all_twostep_mse = []
@@ -164,10 +164,10 @@ def main(cfg: DictConfig):
 
     tr = cfg.training
     device = torch.device(tr.get('device', 'cuda'))
-    seed = tr.get('seed', None)
+    seed = tr.seed
     if seed is not None:
-        torch.manual_seed(int(seed))
-        np.random.seed(int(seed))
+        torch.manual_seed(seed)
+        np.random.seed(seed)
     tau = float(tr.get('tau', 1.05))
     n_eval_batches = int(tr.get('n_eval_batches', 30))
     n_noise_samples = int(tr.get('n_noise_samples', 1))
@@ -315,7 +315,10 @@ def main(cfg: DictConfig):
 
     # Merge pretraining params into training, and override model schedule
     train_cfg = OmegaConf.merge(cfg, {
-        "training": OmegaConf.to_container(cfg.pretraining, resolve=True),
+        "training": {
+            **OmegaConf.to_container(cfg.pretraining, resolve=True),
+            "seed": seed,
+        },
         "model": {
             "diffSchedule": "from_file",
             "schedule_path": result_path,

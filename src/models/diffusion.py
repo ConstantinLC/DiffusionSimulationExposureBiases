@@ -1,3 +1,4 @@
+
 ### Mainly copied from https://github.com/tum-pbs/autoreg-pde-diffusion/blob/main/src/turbpred/model_diffusion.py
 
 import torch
@@ -32,6 +33,7 @@ class DiffusionModel(nn.Module):
         self.inferenceSamplingMode = inferenceSamplingMode # "ddpm" or "ddim"
         self.diffCondIntegration = diffCondIntegration # "noisy" or "clean"
         self.architecture = architecture
+        self.use_lognormal_timesteps = (diffSchedule == "edm")
         
         if diffSchedule == "linear":
             sigmas = sigmas_from_betas(linear_beta_schedule(timesteps=self.timesteps))
@@ -49,6 +51,8 @@ class DiffusionModel(nn.Module):
         elif diffSchedule == "initial_exploration":
             sigmas = initial_exploration_beta_schedule(min_log_value=-2.5, timesteps=self.timesteps)
         elif diffSchedule == "log_linear":
+            sigmas = schedule_log_linear(sigma_min=10**-2.5, sigma_max=10**-1.3, T=self.timesteps)
+        elif diffSchedule == "edm":
             sigmas = schedule_log_linear(sigma_min=10**-2.5, sigma_max=10**-1.3, T=self.timesteps)
         elif diffSchedule == "inverseCosLog-1.875":
             sigmas = cosine_sigma_schedule(10**-1.875, 10**-0.0001, 20)
@@ -133,6 +137,16 @@ class DiffusionModel(nn.Module):
         self.unet.sigmas = sqrtAlphasCumprod / sqrtOneMinusAlphasCumprod
         self.timesteps = len(sigmas)
 
+    def _sample_timesteps(self, batch_size, device):
+        if self.use_lognormal_timesteps:
+            sigmas = self.sqrtOneMinusAlphasCumprod.ravel()
+            log_sigma = torch.randn(batch_size, device=device) * 1.2 - 1.2
+            sigma_samples = log_sigma.exp().clamp(sigmas.min(), sigmas.max())
+            t = torch.argmin(torch.abs(sigmas.unsqueeze(0) - sigma_samples.unsqueeze(1)), dim=1)
+        else:
+            t = torch.randint(0, self.timesteps, (batch_size,), device=device).long()
+        return t
+
     def forward(self, conditioning:torch.Tensor, data:torch.Tensor = None, return_x0_estimate:bool = False,
                 input_type:str = "ancestor", lower_timestep_limit:int = 0, start_step:int = None) -> torch.Tensor:
 
@@ -155,7 +169,7 @@ class DiffusionModel(nn.Module):
         # TRAINING
         # ==========================
         if self.training:
-            t = torch.randint(0, self.timesteps, (d.shape[0],), device=device).long()
+            t = self._sample_timesteps(d.shape[0], device)
             dNoise = torch.randn_like(d)
             dNoisy = self.sqrtAlphasCumprod[t] * d + self.sqrtOneMinusAlphasCumprod[t] * dNoise
             noise = torch.cat((cond, dNoise), dim=1)

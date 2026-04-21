@@ -12,12 +12,12 @@ model:
 
 training:
   device: cuda
-  num_epochs: 101
-  T_max: 101
+  num_epochs: 51
+  T_max: 51
   tau: 1.05
   log_sigma_min: -3.0
   log_sigma_max: -0.0001
-  n_exploration_levels: 100
+  n_exploration_levels: 40
   epochs_per_pass: 100
   eval_every_epoch: 5
   max_passes: 1

@@ -547,6 +547,31 @@ def get_next_run_number(base_dir):
         return max(run_numbers) + 1
 
 
+def get_model_folder_name(model_cfg, prediction_steps: int = 1) -> str:
+    """Returns the model-level folder name (one level above run_i)."""
+    from src.config import DiffusionModelConfig, RefinerConfig
+    if isinstance(model_cfg, DiffusionModelConfig):
+        base = f"DiffusionModel_{model_cfg.diffSchedule}"
+    else:
+        base = model_cfg.type
+    if prediction_steps > 1:
+        base = f"{base}_UT{prediction_steps}"
+    return base
+
+
+def get_model_run_dir(base_dir: str, model_cfg, prediction_steps: int = 1) -> tuple[str, str, str]:
+    """
+    Returns (model_folder_name, run_name, checkpoint_dir) where checkpoint_dir
+    is base_dir / model_folder / run_<next_i>.
+    """
+    model_folder = get_model_folder_name(model_cfg, prediction_steps)
+    model_dir = os.path.join(base_dir, model_folder)
+    run_number = get_next_run_number(model_dir)
+    run_name = f"run_{run_number}"
+    checkpoint_dir = os.path.join(model_dir, run_name)
+    return model_folder, run_name, checkpoint_dir
+
+
 def get_run_dir_name(base_dir, model_cfg):
     """
     Builds a descriptive run directory name based on model config type and key hyperparameters.

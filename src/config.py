@@ -5,6 +5,7 @@ from omegaconf import DictConfig, OmegaConf
 
 class TrainingConfig(BaseModel):
     num_epochs: int
+    seed: Optional[int] = None
     learning_rate_start: float = 1e-4
     learning_rate_end: float = 1e-6
     T_max: int
