@@ -155,7 +155,13 @@ def main(cfg: DictConfig) -> None:
     run_name = "debug"
     checkpoint_dir = None
     if is_master:
-        _, run_name, _ckpt = get_model_run_dir(config.checkpoint_dir, config.model, config.data.prediction_steps)
+        import re as _re
+        if _re.search(r'[\\/]run_\d+$', config.checkpoint_dir):
+            # Explicit run directory supplied (e.g. pre-allocated by a launcher script).
+            run_name = os.path.basename(config.checkpoint_dir)
+            _ckpt = config.checkpoint_dir
+        else:
+            _, run_name, _ckpt = get_model_run_dir(config.checkpoint_dir, config.model, config.data.prediction_steps)
         if not config.debugging:
             checkpoint_dir = _ckpt
             os.makedirs(checkpoint_dir, exist_ok=True)

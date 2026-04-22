@@ -110,6 +110,7 @@ class DiffusionModel(nn.Module):
             raise ValueError(f"Unsupported dimension: {self.dimension}")
         
         if checkpoint != "":
+            print('aaaa')
             print(f"Loading Checkpoint from {checkpoint}")
             ckpt = torch.load(checkpoint)
             if 'stateDictDecoder' in ckpt.keys():
@@ -133,7 +134,7 @@ class DiffusionModel(nn.Module):
         # Register buffers with correct broadcasting shape
         self.register_buffer("sqrtAlphasCumprod", prep(sqrtAlphasCumprod, self.dimension))
         self.register_buffer("sqrtOneMinusAlphasCumprod", prep(sqrtOneMinusAlphasCumprod, self.dimension))
-        print(self.sqrtOneMinusAlphasCumprod)
+        print(self.sqrtOneMinusAlphasCumprod.ravel())
         self.unet.sigmas = sqrtAlphasCumprod / sqrtOneMinusAlphasCumprod
         self.timesteps = len(sigmas)
 

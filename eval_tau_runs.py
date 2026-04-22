@@ -205,6 +205,10 @@ def plot_averaged(tau_averaged, output_dir):
         nl0      = np.array([r["noise_levels"][0]                    for r in seed_results])
         clean0   = np.array([r["bias"]["mse_clean"][0]               for r in seed_results])
         infer0   = np.array([r["bias"]["mse_clean_own_pred"][0]      for r in seed_results])
+        ratio0   = np.sqrt(infer0 / clean0)
+        ratio0_mean = float(np.mean(ratio0))
+        print(f"  sqrt(mse_inf[0]/mse_clean[0]) per run: {ratio0.tolist()}")
+        print(f"  mean sqrt(mse_inf[0]/mse_clean[0]): {ratio0_mean:.6f}")
         records[tau_str] = {
             "tau": tau,
             "noise_levels":      float(np.mean(nl0)),
@@ -212,6 +216,8 @@ def plot_averaged(tau_averaged, output_dir):
             "mse_clean_std":     float(np.std(clean0)),
             "mse_inference_mean": float(np.mean(infer0)),
             "mse_inference_std":  float(np.std(infer0)),
+            "sqrt_mse_inf_over_clean_mean": ratio0_mean,
+            "sqrt_mse_inf_over_clean_per_run": ratio0.tolist(),
             "runs": [
                 {
                     "ckpt_dir": r["ckpt_dir"],

@@ -1,19 +1,21 @@
 #!/bin/bash
-# WeatherBench — full baseline + adaptive schedule training.
+# Kuramoto–Sivashinsky — full baseline + adaptive schedule training.
 #
 # Methods trained (3 seeds each, run sequentially one method at a time):
-#   unet     — plain 2-D U-Net
+#   unet     — plain 1-D U-Net
 #   linear   — DiffusionModel with linear schedule
-#   sigmoid  — DiffusionModel with sigmoid schedule
+#   cosine   — DiffusionModel with cosine schedule
+#   edm      — DiffusionModel with EDM schedule
 #   refiner  — PDE-Refiner
 #   adaptive — exploration (Phase 1) + greedy schedule (Phase 2+3)
 #
-# Methods and seeds both run sequentially.  Existing run_N
+# For each method the N_SEEDS seeds are launched in parallel; the script waits
+# for all seeds to finish before moving to the next method.  Existing run_N
 # dirs (identified by the presence of config.json) are skipped.
 #
 # Usage:
-#   bash run_wb.sh
-#   GPUS="0 1 2" bash run_wb.sh
+#   bash run_ks.sh
+#   GPUS="0 1 2" bash run_ks.sh
 #
 # Environment overrides:
 #   N_SEEDS=3          number of independent seeds
@@ -24,15 +26,15 @@
 set -euo pipefail
 
 N_SEEDS="${N_SEEDS:-3}"
-TAU="${TAU:-1.05}"
+TAU="${TAU:-1.1}"
 GPUS="${GPUS:-}"
 DEVICE="${DEVICE:-cuda}"
-BASE_CKPT="./checkpoints/WeatherBench"
-LOGDIR="./logs/wb"
+BASE_CKPT="./checkpoints/KuramotoSivashinsky"
+LOGDIR="./logs/ks"
 
 mkdir -p "$LOGDIR"
 
-log() { echo "[$(date '+%H:%M:%S')] [WB] $*"; }
+log() { echo "[$(date '+%H:%M:%S')] [KS] $*"; }
 
 device_for() {
     local idx=$1
@@ -46,8 +48,8 @@ device_for() {
 
 log "N_SEEDS=$N_SEEDS  TAU=$TAU  GPUS=${GPUS:-<all use $DEVICE>}"
 
-# ── run_method_seeds: run N_SEEDS seeds for one baseline method sequentially,
-#    exit 1 on any failure.
+# ── run_method_seeds: launch N_SEEDS seeds for one baseline method in parallel,
+#    wait for all, exit 1 on any failure.
 # Args: <method_name> <checkpoint_dir> <extra_hydra_args...>
 run_method_seeds() {
     local method=$1 mdir=$2
@@ -55,6 +57,7 @@ run_method_seeds() {
     local extra=("$@")
 
     log "=== $method: starting ==="
+    declare -A pids logs
 
     for ((i=0; i<N_SEEDS; i++)); do
         local run_dir="$mdir/run_$i"
@@ -68,26 +71,38 @@ run_method_seeds() {
         local dev logf
         dev="$(device_for "$i")"
         logf="$LOGDIR/${method}_run${i}.log"
-        log "[run] $method run_$i dev=$dev -> $logf"
+        log "[bg] $method run_$i dev=$dev -> $logf"
 
         python train.py \
-            +experiment=wb \
+            +experiment=ks \
             checkpoint_dir="$run_dir" \
             training.device="$dev" \
             "${extra[@]}" \
-            >"$logf" 2>&1 || { log "[FAIL] $method run_$i — see $logf"; exit 1; }
+            >"$logf" 2>&1 &
 
-        log "[done] $method run_$i"
+        pids[$i]=$!
+        logs[$i]="$logf"
     done
 
+    local ok=0
+    for i in "${!pids[@]}"; do
+        if wait "${pids[$i]}"; then
+            log "[done] $method run_$i"
+        else
+            log "[FAIL] $method run_$i — see ${logs[$i]}"
+            ok=1
+        fi
+    done
+    [ "$ok" -eq 0 ] || { log "$method failed — aborting."; exit 1; }
     log "=== $method: all seeds done ==="
 }
 
-# ── run_adaptive_seeds: run N_SEEDS adaptive (exploration+greedy) seeds
-#    sequentially.
+# ── run_adaptive_seeds: launch N_SEEDS adaptive (exploration+greedy) seeds in
+#    parallel, wait for all.
 run_adaptive_seeds() {
     local exp_base="$BASE_CKPT/exploration"
     log "=== adaptive: starting ==="
+    declare -A pids logs
 
     for ((i=0; i<N_SEEDS; i++)); do
         local run_dir="$exp_base/run_$i"
@@ -103,41 +118,55 @@ run_adaptive_seeds() {
 
         if [ -f "$run_dir/exploration_state.json" ]; then
             logf="$LOGDIR/adaptive_greedy_run${i}.log"
-            log "[run] adaptive run_$i greedy-only dev=$dev -> $logf"
+            log "[bg] adaptive run_$i greedy-only dev=$dev -> $logf"
             python train_greedy_schedule.py \
-                +experiment=wb_exploration \
+                +experiment=ks_exploration \
                 "training.exploration_run_dir=$run_dir" \
                 training.tau="$TAU" \
                 training.device="$dev" \
-                >"$logf" 2>&1 || { log "[FAIL] adaptive run_$i — see $logf"; exit 1; }
+                >"$logf" 2>&1 &
         else
             logf="$LOGDIR/adaptive_run${i}.log"
-            log "[run] adaptive run_$i full dev=$dev -> $logf"
-            python train_exploration.py \
-                +experiment=wb_exploration \
-                checkpoint_dir="$run_dir" \
-                training.tau="$TAU" \
-                training.device="$dev" \
-                >>"$logf" 2>&1 || { log "[FAIL] adaptive run_$i exploration — see $logf"; exit 1; }
-            python train_greedy_schedule.py \
-                +experiment=wb_exploration \
-                "training.exploration_run_dir=$run_dir" \
-                training.tau="$TAU" \
-                training.device="$dev" \
-                >>"$logf" 2>&1 || { log "[FAIL] adaptive run_$i greedy — see $logf"; exit 1; }
+            log "[bg] adaptive run_$i full dev=$dev -> $logf"
+            (
+                python train_exploration.py \
+                    +experiment=ks_exploration \
+                    checkpoint_dir="$run_dir" \
+                    training.tau="$TAU" \
+                    training.device="$dev" \
+                    >>"$logf" 2>&1 \
+                && python train_greedy_schedule.py \
+                    +experiment=ks_exploration \
+                    "training.exploration_run_dir=$run_dir" \
+                    training.tau="$TAU" \
+                    training.device="$dev" \
+                    >>"$logf" 2>&1
+            ) &
         fi
 
-        log "[done] adaptive run_$i"
+        pids[$i]=$!
+        logs[$i]="$logf"
     done
 
+    local ok=0
+    for i in "${!pids[@]}"; do
+        if wait "${pids[$i]}"; then
+            log "[done] adaptive run_$i"
+        else
+            log "[FAIL] adaptive run_$i — see ${logs[$i]}"
+            ok=1
+        fi
+    done
+    [ "$ok" -eq 0 ] || { log "adaptive failed — aborting."; exit 1; }
     log "=== adaptive: all seeds done ==="
 }
 
 # ── Sequential method order ───────────────────────────────────────────────────
-run_method_seeds unet    "$BASE_CKPT/Unet2D"                model=unet_2d
+run_method_seeds refiner "$BASE_CKPT/PDERefiner"            model=refiner model.log_sigma_min=-2.5
+run_method_seeds unet    "$BASE_CKPT/Unet1D"                model=unet_1d
 run_method_seeds linear  "$BASE_CKPT/DiffusionModel_linear" model=diffusion model.diffSchedule=linear
-run_method_seeds sigmoid "$BASE_CKPT/DiffusionModel_sigmoid" model=diffusion model.diffSchedule=sigmoid
-run_method_seeds refiner "$BASE_CKPT/PDERefiner"            model=refiner
-run_adaptive_seeds
+run_method_seeds cosine  "$BASE_CKPT/DiffusionModel_cosine" model=diffusion model.diffSchedule=cosine
+run_method_seeds edm     "$BASE_CKPT/DiffusionModel_edm"    model=diffusion model.diffSchedule=edm
+#run_adaptive_seeds
 
 log "All done. Checkpoints in $BASE_CKPT"
