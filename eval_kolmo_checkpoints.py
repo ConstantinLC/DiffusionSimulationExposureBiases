@@ -44,6 +44,7 @@ from src.models.unet_2d import Unet
 from src.utils.general import fsd_torch_radial, vorticity
 
 BASE = ROOT / "checkpoints" / "KolmogorovFlow"
+EXPLORATION_BASE = BASE / "exploration"
 
 # Top-level folders that contain trained models (regex patterns).
 # Anything else (exploration, old++, baselines, …) is skipped.
@@ -69,6 +70,33 @@ def is_valid_ckpt(path: Path) -> bool:
     if not (path / "config.json").exists():
         return False
     return (path / "best_model.pth").exists() or bool(list(path.glob("epoch_*.pth")))
+
+
+def _collect_ckpts(directory: Path, max_depth: int = 4) -> list[Path]:
+    """Recursively collect valid checkpoint directories up to max_depth."""
+    if max_depth == 0:
+        return []
+    found = []
+    for sub in sorted(directory.iterdir()):
+        if not sub.is_dir():
+            continue
+        if is_valid_ckpt(sub):
+            found.append(sub)
+        else:
+            found.extend(_collect_ckpts(sub, max_depth - 1))
+    return found
+
+
+def discover_exploration_runs(base: Path) -> dict[str, list[Path]]:
+    """Returns {run_folder_name: [greedy_trained_dir, ...]} for all run_* subfolders."""
+    groups: dict[str, list[Path]] = {}
+    for run_dir in sorted(base.iterdir()):
+        if not run_dir.is_dir() or not run_dir.name.startswith("run_"):
+            continue
+        runs = _collect_ckpts(run_dir)
+        if runs:
+            groups[run_dir.name] = runs
+    return groups
 
 
 def discover_runs(base: Path) -> dict[str, list[Path]]:
@@ -155,6 +183,7 @@ def build_model(model_params: dict, ckpt_path: Path) -> tuple[torch.nn.Module, s
             architecture=mp.get("architecture", "Unet2D"),
             checkpoint=str(ckpt_path),
             load_betas=False,
+            schedule_path=mp.get("schedule_path"),
         )
         return model, "diffusion"
 
@@ -388,6 +417,20 @@ def get_nfe(model: torch.nn.Module, arch: str) -> int:
     return 1  # unet
 
 
+def compute_group_summary(group_results: dict) -> dict:
+    """Compute mean and std for each numeric metric across all successful runs."""
+    metric_keys = ["step1_mse", "avg_mse", "last_step_mse",
+                   "step1_vort_mse", "avg_vort_mse", "last_vort_mse",
+                   "time_to_failure", "fsd", "reb", "nfe"]
+    summary = {}
+    for key in metric_keys:
+        vals = [v[key] for v in group_results.values() if isinstance(v, dict) and v.get(key) is not None]
+        if vals:
+            arr = np.array(vals, dtype=float)
+            summary[key] = {"mean": float(np.mean(arr)), "std": float(np.std(arr))}
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Per-run evaluation
 # ---------------------------------------------------------------------------
@@ -475,6 +518,59 @@ def main():
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nSaved results to {out_path}")
+
+    # ------------------------------------------------------------------
+    # exploration evaluation
+    # ------------------------------------------------------------------
+    if not EXPLORATION_BASE.exists():
+        return
+
+    exploration_groups = discover_exploration_runs(EXPLORATION_BASE)
+
+    if not exploration_groups:
+        print(f"No valid checkpoints found under {EXPLORATION_BASE}.")
+        return
+
+    print(f"\nDiscovered {len(exploration_groups)} exploration run(s):")
+    for name, runs in exploration_groups.items():
+        print(f"  {name}: {len(runs)} run(s)")
+        for r in runs:
+            print(f"    {r}")
+
+    if args.dry_run:
+        return
+
+    exploration_results: dict[str, dict[str, dict]] = {}
+
+    for run_name, run_dirs in exploration_groups.items():
+        print(f"\n{'='*60}")
+        print(f"  exploration run: {run_name}")
+        group_results: dict[str, dict] = {}
+
+        for run_dir in run_dirs:
+            run_key = str(run_dir.relative_to(EXPLORATION_BASE))
+            try:
+                metrics = evaluate_run(run_dir, args.device, args.rollout_steps, args.batch_size)
+                group_results[run_key] = metrics
+                print(f"    [{run_dir.name}] step1_mse={metrics.get('step1_mse'):.4e}  "
+                      f"avg_mse={metrics.get('avg_mse'):.4e}  "
+                      f"ttf={metrics.get('time_to_failure')}  "
+                      f"fsd={metrics.get('fsd')}  "
+                      f"reb={metrics.get('reb')}  "
+                      f"nfe={metrics.get('nfe')}")
+            except Exception as exc:
+                print(f"    [{run_dir.name}] FAILED: {exc}")
+                group_results[run_key] = {"error": str(exc)}
+
+        summary = compute_group_summary(group_results)
+        group_results["_summary"] = summary
+        print(f"  Summary for {run_name}: {summary}")
+        exploration_results[run_name] = group_results
+
+    exploration_out_path = EXPLORATION_BASE / "results.json"
+    with open(exploration_out_path, "w") as f:
+        json.dump(exploration_results, f, indent=2)
+    print(f"\nSaved exploration results to {exploration_out_path}")
 
 
 if __name__ == "__main__":

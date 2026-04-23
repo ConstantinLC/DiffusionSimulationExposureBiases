@@ -8,7 +8,8 @@ data:
   variables: [z500, t850]
   resolution: 64
   frames_per_step: 1        # stride in 6-hourly timesteps (1 = 6h, 4 = 24h)
-  traj_length: 56           # 14 days at 6-hourly with frames_per_step=1
+  traj_length: 21           # 1 conditioning frame + 20 AR steps (5 days at 6-hourly)
+  traj_stride: 20           # non-overlapping trajectories: [0,20], [20,40], …
   frames_per_time_step: 1
   limit_trajectories_train: -1
   limit_trajectories_val: -1

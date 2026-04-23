@@ -33,12 +33,13 @@ sys.path.insert(0, str(ROOT))
 
 from src.config import DataConfig
 from src.data.loaders import get_data_loaders
-from src.models.diffusion import DiffusionModel
+from src.models.diffusion import DiffusionModel, EDMDiffusionModel
 from src.models.pderefiner import PDERefiner
 from src.models.unet_1d import Unet1D
 from src.models.unet_2d import Unet
 
 BASE = ROOT / "checkpoints" / "KuramotoSivashinsky"
+TAU_GRID_BASE = BASE / "tau_grid"
 
 # Only top-level folders whose names match one of these patterns are evaluated.
 VALID_MODEL_PATTERNS = [
@@ -98,6 +99,18 @@ def discover_runs(base: Path) -> dict[str, list[Path]]:
     return groups
 
 
+def discover_tau_runs(base: Path) -> dict[str, list[Path]]:
+    """Returns {tau_folder_name: [greedy_trained_dir, ...]} for all tau_* subfolders."""
+    groups: dict[str, list[Path]] = {}
+    for tau_dir in sorted(base.iterdir()):
+        if not tau_dir.is_dir() or not tau_dir.name.startswith("tau_"):
+            continue
+        runs = _collect_ckpts(tau_dir)
+        if runs:
+            groups[tau_dir.name] = runs
+    return groups
+
+
 # ---------------------------------------------------------------------------
 # Model building
 # ---------------------------------------------------------------------------
@@ -150,8 +163,34 @@ def build_model(model_params: dict, ckpt_path: Path) -> tuple[torch.nn.Module, s
             architecture=mp.get("architecture", "Unet1D"),
             checkpoint=str(ckpt_path),
             load_betas=False,
+            schedule_path=mp.get("schedule_path"),
         )
         return model, "diffusion"
+
+    if "num_steps" in mp and "sigma_min" in mp and "sigma_max" in mp:
+        model = EDMDiffusionModel(
+            dimension=mp.get("dimension", 1),
+            dataSize=mp["dataSize"],
+            condChannels=mp["condChannels"],
+            dataChannels=mp["dataChannels"],
+            num_steps=mp["num_steps"],
+            sigma_min=mp["sigma_min"],
+            sigma_max=mp["sigma_max"],
+            sigma_data=mp.get("sigma_data", 0.5),
+            P_mean=mp.get("P_mean", -1.2),
+            P_std=mp.get("P_std", 1.2),
+            rho=mp.get("rho", 7.0),
+            solver=mp.get("solver", "heun"),
+            stochastic=mp.get("stochastic", False),
+            S_churn=mp.get("S_churn", 10.0),
+            S_tmin=mp.get("S_tmin", 0.0),
+            S_tmax=mp.get("S_tmax", 1e6),
+            S_noise=mp.get("S_noise", 1.0),
+            padding_mode=mp.get("padding_mode", "circular"),
+            architecture=mp.get("architecture", "Unet1D"),
+            checkpoint=str(ckpt_path),
+        )
+        return model, "edm"
 
     # Unet1D / Unet2D (legacy JSON: has "dim", "channels", no condChannels).
     # Load weights manually since there is no checkpoint argument.
@@ -334,7 +373,7 @@ def compute_reb(
     Relative Exposure Bias = mean(MSE_own_pred) / mean(MSE_clean).
     Only defined for DiffusionModel and PDERefiner; returns None for Unet.
     """
-    if arch == "unet":
+    if arch in ("unet", "edm"):
         return None
 
     model.eval()
@@ -368,11 +407,25 @@ def compute_reb(
     return float(reb) if np.isfinite(reb) else None
 
 
+def compute_group_summary(group_results: dict) -> dict:
+    """Compute mean and std for each numeric metric across all successful runs."""
+    metric_keys = ["step1_mse", "avg_mse", "last_step_mse", "time_to_failure", "reb", "nfe"]
+    summary = {}
+    for key in metric_keys:
+        vals = [v[key] for v in group_results.values() if isinstance(v, dict) and v.get(key) is not None]
+        if vals:
+            arr = np.array(vals, dtype=float)
+            summary[key] = {"mean": float(np.mean(arr)), "std": float(np.std(arr))}
+    return summary
+
+
 def get_nfe(model: torch.nn.Module, arch: str) -> int:
     if arch == "diffusion":
         return int(model.timesteps)
     if arch == "refiner":
         return int(model.nTimesteps)
+    if arch == "edm":
+        return int(model.num_steps)
     return 1
 
 
@@ -452,12 +505,64 @@ def main():
                 print(f"    [{run_dir.name}] FAILED: {exc}")
                 group_results[run_key] = {"error": str(exc)}
 
+        summary = compute_group_summary(group_results)
+        group_results["_summary"] = summary
+        print(f"  Summary for {group_name}: {summary}")
         all_results[group_name] = group_results
 
     out_path = BASE / "results.json"
     with open(out_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nSaved results to {out_path}")
+
+    # ------------------------------------------------------------------
+    # tau_grid evaluation
+    # ------------------------------------------------------------------
+    tau_groups = discover_tau_runs(TAU_GRID_BASE)
+
+    if not tau_groups:
+        print(f"No valid checkpoints found under {TAU_GRID_BASE}.")
+        return
+
+    print(f"\nDiscovered {len(tau_groups)} tau group(s):")
+    for name, runs in tau_groups.items():
+        print(f"  {name}: {len(runs)} run(s)")
+        for r in runs:
+            print(f"    {r}")
+
+    if args.dry_run:
+        return
+
+    tau_results: dict[str, dict[str, dict]] = {}
+
+    for tau_name, run_dirs in tau_groups.items():
+        print(f"\n{'='*60}")
+        print(f"  tau group: {tau_name}")
+        group_results = {}
+
+        for run_dir in run_dirs:
+            run_key = str(run_dir.relative_to(TAU_GRID_BASE))
+            try:
+                metrics = evaluate_run(run_dir, args.device, args.rollout_steps, args.batch_size)
+                group_results[run_key] = metrics
+                print(f"    [{run_dir.name}] step1_mse={metrics.get('step1_mse'):.4e}  "
+                      f"avg_mse={metrics.get('avg_mse'):.4e}  "
+                      f"ttf={metrics.get('time_to_failure')}  "
+                      f"reb={metrics.get('reb')}  "
+                      f"nfe={metrics.get('nfe')}")
+            except Exception as exc:
+                print(f"    [{run_dir.name}] FAILED: {exc}")
+                group_results[run_key] = {"error": str(exc)}
+
+        summary = compute_group_summary(group_results)
+        group_results["_summary"] = summary
+        print(f"  Summary for {tau_name}: {summary}")
+        tau_results[tau_name] = group_results
+
+    tau_out_path = TAU_GRID_BASE / "results.json"
+    with open(tau_out_path, "w") as f:
+        json.dump(tau_results, f, indent=2)
+    print(f"\nSaved tau_grid results to {tau_out_path}")
 
 
 if __name__ == "__main__":

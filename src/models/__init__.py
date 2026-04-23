@@ -3,6 +3,7 @@
 __all__ = [
     "Unet",
     "DiffusionModel",
+    "EDMDiffusionModel",
     "PDERefiner",
     "Unet1D",
     "UnetACDM",

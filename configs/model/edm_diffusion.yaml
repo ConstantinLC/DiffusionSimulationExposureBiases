@@ -1,0 +1,17 @@
+# @package model
+type: EDMDiffusionModel
+
+num_steps: 40
+sigma_min: 0.002
+sigma_max: 80.0
+sigma_data: 0.5
+P_mean: -1.2
+P_std: 1.2
+rho: 7.0
+solver: heun        # 'euler' or 'heun'
+stochastic: false   # false = deterministic (Alg 1), true = stochastic churn (Alg 2)
+S_churn: 10.0
+S_tmin: 0.0
+S_tmax: 1000000.0
+S_noise: 1.0
+checkpoint: ""

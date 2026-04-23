@@ -332,8 +332,12 @@ class Unet(nn.Module):
         x = self.init_conv(x)
 
         if self.time_mlp is not None:
-            noise_levels = torch.log(self.sigmas[time])
-            t = self.time_mlp(noise_levels)
+            if time.is_floating_point():
+                # EDM mode: time is c_noise = log(sigma)/4, use directly
+                t = self.time_mlp(time.float())
+            else:
+                noise_levels = torch.log(self.sigmas[time])
+                t = self.time_mlp(noise_levels)
         else:
             t = None
 

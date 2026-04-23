@@ -616,9 +616,9 @@ def parse_checkpoint_args(args_list):
     return ckpt_dict
 
 def run_model(model, x):
-    from ..models.diffusion import DiffusionModel
+    from ..models.diffusion import DiffusionModel, EDMDiffusionModel
     from ..models.pderefiner import PDERefiner
-    if isinstance(model, DiffusionModel) or isinstance(model, PDERefiner):
+    if isinstance(model, (DiffusionModel, EDMDiffusionModel, PDERefiner)):
         return model(x)
     else:
         return model(x, time=None)

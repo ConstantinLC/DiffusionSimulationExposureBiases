@@ -284,9 +284,15 @@ class Unet1D(nn.Module):
     def forward(self, x, time):
         x = self.init_conv(x)
 
-        noise_levels = torch.log(self.sigmas[time])
-
-        t = self.time_mlp(noise_levels) if self.time_mlp is not None else None
+        if self.time_mlp is not None:
+            if time.is_floating_point():
+                # EDM mode: time is c_noise = log(sigma)/4, use directly
+                t = self.time_mlp(time.float())
+            else:
+                noise_levels = torch.log(self.sigmas[time])
+                t = self.time_mlp(noise_levels)
+        else:
+            t = None
 
         h = []
         interm = []

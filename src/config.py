@@ -37,6 +37,7 @@ class DataConfig(BaseModel):
     prediction_steps: int = 1   # replaces sequence_length[0]-1; 1=single-step, 2=multi-step
     frames_per_step: int = 1    # replaces sequence_length[1]
     traj_length: int = 64       # replaces trajectory_sequence_length[0]
+    traj_stride: int = 1        # step between trajectory start points (1 = sliding window, traj_length-1 = non-overlapping)
     frames_per_time_step: int = 1
     limit_trajectories_train: int = -1
     limit_trajectories_val: int = -1
@@ -83,6 +84,26 @@ class DiffusionModelConfig(_NeuralBase):
     sigma_max: Optional[float] = None  # used by diffSchedule="log_uniform"
 
 
+class EDMDiffusionModelConfig(_NeuralBase):
+    type: Literal["EDMDiffusionModel"] = "EDMDiffusionModel"
+    # Training hyperparameters
+    num_steps: int = 20
+    sigma_min: float = 0.002
+    sigma_max: float = 80.0
+    sigma_data: float = 0.5
+    P_mean: float = -1.2
+    P_std: float = 1.2
+    rho: float = 7.0
+    # Sampling: 'euler' or 'heun'
+    solver: str = "heun"
+    # Stochastic sampler (Algorithm 2). stochastic=False → deterministic (Algorithm 1).
+    stochastic: bool = False
+    S_churn: float = 10.0
+    S_tmin: float = 0.0
+    S_tmax: float = 1e6   # effectively ∞ — all sigmas <= sigma_max=80 qualify
+    S_noise: float = 1.0
+
+
 class RefinerConfig(_NeuralBase):
     type: Literal["PDERefiner"] = "PDERefiner"
     refinementSteps: int = 3
@@ -118,7 +139,7 @@ class FNOConfig(_NeuralBase):
     n_layers: int = 4
 
 
-ModelConfig = Union[DiffusionModelConfig, RefinerConfig, Unet2DConfig, Unet1DConfig, DilResNetConfig, FNOConfig]
+ModelConfig = Union[DiffusionModelConfig, EDMDiffusionModelConfig, RefinerConfig, Unet2DConfig, Unet1DConfig, DilResNetConfig, FNOConfig]
 
 
 # ---------------------------------------------------------------------------

@@ -8,9 +8,9 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from src.config import ExperimentConfig, DiffusionModelConfig, RefinerConfig, Unet2DConfig, Unet1DConfig, DilResNetConfig, FNOConfig
+from src.config import ExperimentConfig, DiffusionModelConfig, EDMDiffusionModelConfig, RefinerConfig, Unet2DConfig, Unet1DConfig, DilResNetConfig, FNOConfig
 from src.data.loaders import get_data_loaders
-from src.models.diffusion import DiffusionModel
+from src.models.diffusion import DiffusionModel, EDMDiffusionModel
 from src.models.pderefiner import PDERefiner
 from src.models.unet_2d import Unet
 from src.models.unet_1d import Unet1D
@@ -45,6 +45,30 @@ def build_model(config: ExperimentConfig) -> nn.Module:
             schedule_path=mp.schedule_path,
             sigma_min=mp.sigma_min,
             sigma_max=mp.sigma_max,
+        )
+
+    elif isinstance(mp, EDMDiffusionModelConfig):
+        return EDMDiffusionModel(
+            dimension=mp.dimension,
+            dataSize=mp.dataSize,
+            condChannels=mp.condChannels,
+            dataChannels=mp.dataChannels,
+            num_steps=mp.num_steps,
+            sigma_min=mp.sigma_min,
+            sigma_max=mp.sigma_max,
+            sigma_data=mp.sigma_data,
+            P_mean=mp.P_mean,
+            P_std=mp.P_std,
+            rho=mp.rho,
+            solver=mp.solver,
+            stochastic=mp.stochastic,
+            S_churn=mp.S_churn,
+            S_tmin=mp.S_tmin,
+            S_tmax=mp.S_tmax,
+            S_noise=mp.S_noise,
+            padding_mode=mp.padding_mode,
+            architecture=mp.architecture,
+            checkpoint=mp.checkpoint,
         )
 
     elif isinstance(mp, RefinerConfig):
@@ -222,7 +246,7 @@ def main(cfg: DictConfig) -> None:
 
     # --- Route to the appropriate trainer ---
     prediction_steps = config.data.prediction_steps
-    is_diffusion_like = isinstance(config.model, (DiffusionModelConfig, RefinerConfig))
+    is_diffusion_like = isinstance(config.model, (DiffusionModelConfig, EDMDiffusionModelConfig, RefinerConfig))
     is_unet = isinstance(config.model, (Unet2DConfig, Unet1DConfig, DilResNetConfig, FNOConfig))
 
     if config.data.super_resolution and prediction_steps > 1:

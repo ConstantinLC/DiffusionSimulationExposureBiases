@@ -166,7 +166,7 @@ run_method_seeds refiner "$BASE_CKPT/PDERefiner"            model=refiner model.
 run_method_seeds unet    "$BASE_CKPT/Unet1D"                model=unet_1d
 run_method_seeds linear  "$BASE_CKPT/DiffusionModel_linear" model=diffusion model.diffSchedule=linear
 run_method_seeds cosine  "$BASE_CKPT/DiffusionModel_cosine" model=diffusion model.diffSchedule=cosine
-run_method_seeds edm     "$BASE_CKPT/DiffusionModel_edm"    model=diffusion model.diffSchedule=edm
+run_method_seeds edm     "$BASE_CKPT/DiffusionModel_edm"    model=edm_diffusion
 #run_adaptive_seeds
 
 log "All done. Checkpoints in $BASE_CKPT"

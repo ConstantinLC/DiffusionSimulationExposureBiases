@@ -5,6 +5,7 @@ import wandb
 import os
 from ..utils.general import traj_eval_step
 from ..utils.diffusion import compute_estimate, compute_sigmas_refiner, evaluate_dw_train_inf_gap
+from ..models.diffusion import EDMDiffusionModel
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import json
 import collections
@@ -187,14 +188,15 @@ def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_pa
             target_frame = data[:, 1]
             
             optimizer.zero_grad()
-            if not train_params["end_to_end"]:
-                # Diffusion specific forward pass
+            unwrapped = model.module if isinstance(model, DDP) else model
+            if isinstance(unwrapped, EDMDiffusionModel):
+                loss = model(conditioning_frame, target_frame)
+            elif not train_params["end_to_end"]:
                 noise, predicted_noise = model(conditioning_frame, target_frame)
                 loss = criterion(predicted_noise, noise)
-            
             else:
-                _, noises, predicted_noises  = model(conditioning_frame, target_frame,
-                                                    return_noise_pred = True,
+                _, noises, predicted_noises = model(conditioning_frame, target_frame,
+                                                    return_noise_pred=True,
                                                     input_type="own-pred")
                 loss = criterion(torch.concatenate(noises), torch.concatenate(predicted_noises))
 
@@ -223,15 +225,18 @@ def train_diffusion_model(model, train_loader, val_loader, traj_loader, train_pa
                     conditioning_frame_val = data_val[:, 0]
                     target_frame_val = data_val[:, 1]
 
-                    # Diffusion specific validation pass
-                    if not train_params["end_to_end"]:
-                        # Diffusion specific forward pass
+                    unwrapped = model.module if isinstance(model, DDP) else model
+                    if isinstance(unwrapped, EDMDiffusionModel):
+                        model.train()
+                        loss_val = model(conditioning_frame_val, target_frame_val)
+                        model.eval()
+                    elif not train_params["end_to_end"]:
                         noise, predicted_noise = model(conditioning_frame_val, target_frame_val)
                         loss_val = criterion(predicted_noise, noise)
                     else:
-                        _, noises, predicted_noises  = model(conditioning_frame_val, target_frame_val,
-                                                    return_noise_pred = True,
-                                                    input_type="own-pred")
+                        _, noises, predicted_noises = model(conditioning_frame_val, target_frame_val,
+                                                            return_noise_pred=True,
+                                                            input_type="own-pred")
                         loss_val = criterion(torch.concatenate(noises), torch.concatenate(predicted_noises))
                         
                     running_val_loss += loss_val.item()

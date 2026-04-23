@@ -18,6 +18,7 @@ training:
   log_sigma_min: -3.0
   log_sigma_max: -0.0001
   n_exploration_levels: 40
+  n_active_start: 10
   epochs_per_pass: 100
   eval_every_epoch: 5
   max_passes: 1

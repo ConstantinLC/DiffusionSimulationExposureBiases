@@ -11,7 +11,7 @@ trajectory validation dataset.  The WeatherBench data is 6-hourly, so:
   - 5 d  = rollout step 20  (index 19)
 
 Per-run metrics:
-  - rmse_6h / rmse_3d / rmse_5d  : latitude-weighted RMSE in *normalised* units
+  - rmse_6h / rmse_3d / rmse_5d  : latitude-weighted RMSE in physical units
                                     per variable, e.g. rmse_6h_z500
   - acc_6h  / acc_3d  / acc_5d   : latitude-weighted spatial ACC per variable
                                     (anomaly = normalised field, ~0-mean by construction)
@@ -50,8 +50,8 @@ VALID_MODEL_PATTERNS = [
     r"^DiffusionModel",
     r"^PDERefiner",
     r"^Unet2D",
-    r"^DilResNet",
-    r"^FNO",
+    #r"^DilResNet",
+    #r"^FNO",
 ]
 
 # WeatherBench 2.8125° grid: 64 latitudes from -88.59375° to +88.59375°
@@ -163,7 +163,7 @@ def build_model(model_params: dict, ckpt_path: Path) -> tuple[torch.nn.Module, s
         padding_mode=mp.get("padding_mode", "lonlat"),
     )
     state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
     return model, "unet"
 
 
@@ -210,12 +210,16 @@ def make_data_loader(cfg: dict, batch_size: int, rollout_steps: int):
         sequenceLength=[traj_len, frames_per_step],
         mean=train_set.mean,
         std=train_set.std,
+        stride=rollout_steps,
     )
     traj_loader = DataLoader(
         traj_set, batch_size=batch_size, shuffle=False,
         num_workers=4, pin_memory=True,
     )
-    return traj_loader, variables
+    # (1, C, 1, 1) tensors for unnormalisation inside compute_trajectory_metrics
+    mean = torch.from_numpy(train_set.mean)  # float32
+    std  = torch.from_numpy(train_set.std)
+    return traj_loader, variables, mean, std
 
 
 # ---------------------------------------------------------------------------
@@ -267,13 +271,18 @@ def compute_trajectory_metrics(
     variables: list[str],
     device: str,
     rollout_steps: int,
+    mean: torch.Tensor,
+    std: torch.Tensor,
 ) -> dict:
     """
-    Returns per-horizon RMSE and ACC per variable, plus FSD at the last step.
-    All RMSE values are in normalised units (latitude-weighted).
+    Returns per-horizon RMSE (physical units) and ACC per variable, plus FSD.
+    mean/std: (1, C, 1, 1) tensors used to unnormalise before RMSE computation.
+    ACC is scale-invariant so it is computed in normalised space.
     """
     model.eval()
     lat_w = _lat_weight(device)
+    # per-variable std scalars for unnormalising: shape (C,)
+    std_per_var = std.reshape(-1)   # (C,)
 
     # Accumulators: {horizon: {var: [mse_values]}}
     rmse_acc: dict[str, dict[str, list]] = {h: {v: [] for v in variables} for h in EVAL_STEPS}
@@ -302,12 +311,15 @@ def compute_trajectory_metrics(
                 if idx >= rollout_steps:
                     continue
                 for c, var in enumerate(variables):
-                    p = preds[:, idx, c]    # (B, H, W)
-                    g = gt_cpu[:, idx, c]   # (B, H, W)
-                    sq_err = torch.clamp((p - g) ** 2, max=1e8)
+                    p = preds[:, idx, c]    # (B, H, W) — normalised
+                    g = gt_cpu[:, idx, c]   # (B, H, W) — normalised
+                    # RMSE in physical units: unnormalise by multiplying with per-var std
+                    s = std_per_var[c].item()
+                    sq_err = torch.clamp(((p - g) * s) ** 2, max=1e12)
                     rmse_acc[horizon][var].append(
                         _weighted_mse(sq_err, lat_w.cpu()).item()
                     )
+                    # ACC is scale-invariant: compute in normalised space
                     acc_acc[horizon][var].append(_spatial_acc(p, g, lat_w.cpu()))
 
             preds_last_list.append(preds[:, -1])    # (B, C, H, W)
@@ -361,10 +373,10 @@ def evaluate_run(
 ) -> dict:
     print(f"  Evaluating {run_dir}")
     model, arch, cfg = load_model(run_dir, device)
-    traj_loader, variables = make_data_loader(cfg, batch_size, rollout_steps)
+    traj_loader, variables, mean, std = make_data_loader(cfg, batch_size, rollout_steps)
 
     traj_metrics = compute_trajectory_metrics(
-        model, arch, traj_loader, variables, device, rollout_steps,
+        model, arch, traj_loader, variables, device, rollout_steps, mean, std,
     )
     nfe = get_nfe(model, arch)
 
