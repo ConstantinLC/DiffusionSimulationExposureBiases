@@ -1,0 +1,41 @@
+# @package _global_
+# Online algorithm for Kuramoto-Sivashinsky: joint exploration and schedule
+# construction. Trains on a dense cosine-spaced exploration schedule and builds
+# the final diffusion schedule incrementally via B^2S evaluations.
+#
+# Usage:
+#   python train_algorithm_online.py +experiment=ks_online
+defaults:
+  - override /dataset: ks
+  - override /model: diffusion
+
+checkpoint_dir: ./checkpoints/KuramotoSivashinsky/online
+
+data:
+  prediction_steps: 1
+  batch_size: 64
+  val_batch_size: 256
+
+model:
+  diffSchedule: linear
+  diffSteps: 40
+
+training:
+  device: cuda
+  num_epochs: 10000  # not used directly; satisfies schema
+  T_max: 10000
+  tau: 1.05
+  log_sigma_min: -3.0
+  log_sigma_max: -0.0001
+  n_exploration_levels: 40
+  epochs_per_round: 1000
+  epoch_increase_per_round: 0
+  eval_every_epoch: 20
+  max_rounds: 100
+  exploration_patience: 5
+  n_eval_batches: 30
+  n_noise_samples: 4
+  learning_rate_start: 1.0e-4
+  learning_rate_end: 1.0e-6
+  lr_reduce_factor: 0.5
+  lr_reduce_patience: 10

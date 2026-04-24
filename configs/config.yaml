@@ -32,6 +32,10 @@ training:
   exploration_run_dir: null
   end_to_end: false
   seed: null
+  epochs_per_round: 100
+  max_rounds: 100
+  exploration_patience: 5
+  eval_every_epoch: 0
 
 loss:
   name: mse
