@@ -6,10 +6,10 @@
 # Usage:
 #   python train_algorithm_online.py +experiment=ks_online
 defaults:
-  - override /dataset: ks
+  - override /dataset: kolmogorov
   - override /model: diffusion
 
-checkpoint_dir: ./checkpoints/KuramotoSivashinsky/online
+checkpoint_dir: ./checkpoints/KolmogorovFlow/online
 
 data:
   prediction_steps: 1
@@ -28,10 +28,10 @@ training:
   log_sigma_min: -3.0
   log_sigma_max: -0.0001
   n_exploration_levels: 30
-  epochs_per_round: 100
-  epoch_increase_per_round: 100
-  total_epochs: 1000
-  eval_every_epoch: 20
+  epochs_per_round: 50
+  epoch_increase_per_round: 50
+  total_epochs: 500
+  eval_every_epoch: 10
   exploration_patience: 5
   n_eval_batches: 30
   n_noise_samples: 4

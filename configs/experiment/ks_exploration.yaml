@@ -31,7 +31,7 @@ training:
   n_exploration_levels: 40
   n_active_start: 10
   epochs_per_pass: 1000
-  eval_every_epoch: 20
+  eval_every_epoch: 50
   max_passes: 1
   n_eval_batches: 30
   exploration_run_dir: ""

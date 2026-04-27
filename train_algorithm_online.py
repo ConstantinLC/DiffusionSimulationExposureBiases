@@ -32,10 +32,11 @@ Expected config keys (under `training`):
     log_sigma_min        : float  (default -3.0)
     log_sigma_max        : float  (default -0.0001)
     n_exploration_levels : int    (default 40)
-    epochs_per_round     : int    (default 100)  -- K epochs per round (base)
-    epoch_increase_per_round : int (default 0)  -- added epochs each successive round
-    max_rounds           : int    (default 100)  -- hard stop
-    exploration_patience : int    (default 5)    -- consecutive fruitless rounds before stopping
+    epochs_per_round         : int   (default 100)   -- K epochs per round (base)
+    epoch_increase_per_round : int   (default 0)     -- added epochs each successive round
+    total_epochs             : int   (default None)  -- stop when cumulative epochs >= this
+    max_rounds               : int   (default 100)   -- fallback hard stop when total_epochs unset
+    exploration_patience     : int   (default 5)     -- consecutive fruitless rounds before stopping
     n_eval_batches       : int    (default 30)
     n_noise_samples      : int    (default 4)
     learning_rate_start  : float  (default 1e-4)  -- initial LR, reset each round
@@ -50,7 +51,7 @@ import numpy as np
 
 import torch
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -185,18 +186,23 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device):
 
 
 # ---------------------------------------------------------------------------
-# Inference bias: full multi-step chain through the current final schedule
+# Per-level clean and inference errors over the final schedule
 # ---------------------------------------------------------------------------
 
-def compute_inference_bias(model, val_loader, device, final_schedule_sigmas_lohi, n_batches=30):
+def compute_per_level_errors(model, val_loader, device, final_schedule_sigmas_lohi, n_batches=30):
     """
-    Temporarily set the model to final_schedule_sigmas_lohi (low→high), run
-    the full multi-step denoising chain from sigma_T down to the frontier, and
-    return (ratio, mean_clean_mse) where
-
-        ratio = mean_inference_mse / mean_clean_mse_at_frontier
+    For each sigma in final_schedule_sigmas_lohi (low→high) compute:
+      clean_mse     : single-step denoising MSE when x is noised directly from target
+      inference_mse : MSE of x0_hat when x was propagated by the multi-step chain
+                      running top→bottom through the schedule
 
     Caller must restore the model schedule after this call.
+
+    Returns
+    -------
+    sigmas         : list[float]  (low→high, same order as input)
+    clean_mses     : list[float]
+    inference_mses : list[float]
     """
     model.eval()
     model.compute_schedule_variables(final_schedule_sigmas_lohi.to(device))
@@ -206,8 +212,8 @@ def compute_inference_bias(model, val_loader, device, final_schedule_sigmas_lohi
     sqrtOMA = model.sqrtOneMinusAlphasCumprod
     C_cond  = model.condChannels
 
-    all_inf_mse   = []
-    all_clean_mse = []
+    all_clean_mse = [[] for _ in range(n_steps)]
+    all_inf_mse   = [[] for _ in range(n_steps)]
     spatial_dims  = None
 
     with torch.no_grad():
@@ -223,41 +229,39 @@ def compute_inference_bias(model, val_loader, device, final_schedule_sigmas_lohi
             if spatial_dims is None:
                 spatial_dims = tuple(range(1, target.ndim))
 
-            # Start from highest sigma (t = n_steps-1)
-            t_high = torch.full((B,), n_steps - 1, device=device, dtype=torch.long)
-            eps    = torch.randn_like(target)
-            x      = sqrtA[t_high] * target + sqrtOMA[t_high] * eps
+            # ---- Clean MSE at each level ----
+            for t_idx in range(n_steps):
+                t_vec = torch.full((B,), t_idx, device=device, dtype=torch.long)
+                eps   = torch.randn_like(target)
+                y     = sqrtA[t_vec] * target + sqrtOMA[t_vec] * eps
+                inp   = torch.cat((cond, y), dim=1)
+                pred  = model.unet(inp, t_vec)[:, C_cond:]
+                x0    = (y - sqrtOMA[t_vec] * pred) / sqrtA[t_vec].clamp(min=1e-8)
+                all_clean_mse[t_idx].append((x0 - target).pow(2).mean(dim=spatial_dims).cpu())
 
-            # Denoise step by step down to t = 0
-            for step in range(n_steps - 1, 0, -1):
-                t_cur  = torch.full((B,), step,     device=device, dtype=torch.long)
-                t_next = torch.full((B,), step - 1, device=device, dtype=torch.long)
+            # ---- Inference MSE: run chain top→bottom, record x0_hat at each step ----
+            x = torch.randn_like(target)
+
+            for step in range(n_steps - 1, -1, -1):
+                t_cur  = torch.full((B,), step, device=device, dtype=torch.long)
                 inp    = torch.cat((cond, x), dim=1)
                 pred   = model.unet(inp, t_cur)[:, C_cond:]
                 x0_hat = (x - sqrtOMA[t_cur] * pred) / sqrtA[t_cur].clamp(min=1e-8)
-                if step > 1:
+                all_inf_mse[step].append((x0_hat - target).pow(2).mean(dim=spatial_dims).cpu())
+                if step > 0:
+                    t_next = torch.full((B,), step - 1, device=device, dtype=torch.long)
                     x = sqrtA[t_next] * x0_hat + sqrtOMA[t_next] * torch.randn_like(target)
-                else:
-                    x = x0_hat
 
-            inf_mse = (x - target).pow(2).mean(dim=spatial_dims)
-            all_inf_mse.append(inf_mse.cpu())
-
-            # Clean single-step baseline at frontier (t = 0)
-            t_zero = torch.full((B,), 0, device=device, dtype=torch.long)
-            eps_c  = torch.randn_like(target)
-            y_c    = sqrtA[t_zero] * target + sqrtOMA[t_zero] * eps_c
-            inp_c  = torch.cat((cond, y_c), dim=1)
-            pred_c = model.unet(inp_c, t_zero)[:, C_cond:]
-            x0_c   = (y_c - sqrtOMA[t_zero] * pred_c) / sqrtA[t_zero].clamp(min=1e-8)
-            all_clean_mse.append((x0_c - target).pow(2).mean(dim=spatial_dims).cpu())
-
-    all_inf   = torch.cat(all_inf_mse)
-    all_clean = torch.cat(all_clean_mse)
-    valid     = all_clean > 0
-    mean_inf   = all_inf[valid].mean().item()
-    mean_clean = all_clean[valid].mean().item()
-    return mean_inf / max(mean_clean, 1e-12), mean_clean
+    sigmas = final_schedule_sigmas_lohi.tolist()
+    clean_mses = [
+        torch.cat(all_clean_mse[t]).mean().item() if all_clean_mse[t] else float('nan')
+        for t in range(n_steps)
+    ]
+    inf_mses = [
+        torch.cat(all_inf_mse[t]).mean().item() if all_inf_mse[t] else float('nan')
+        for t in range(n_steps)
+    ]
+    return sigmas, clean_mses, inf_mses
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +287,8 @@ def main(cfg: DictConfig):
     n_levels             = int(tr.get('n_exploration_levels', 40))
     epochs_per_round          = int(tr.get('epochs_per_round', 100))
     epoch_increase_per_round  = int(tr.get('epoch_increase_per_round', 0))
+    _te                       = tr.get('total_epochs', None)
+    total_epochs              = int(_te) if _te is not None else None
     max_rounds                = int(tr.get('max_rounds', 100))
     patience_limit       = int(tr.get('exploration_patience', 5))
     n_eval_batches       = int(tr.get('n_eval_batches', 30))
@@ -290,8 +296,7 @@ def main(cfg: DictConfig):
     eval_every_epoch     = int(tr.get('eval_every_epoch', 0))
     lr_start             = float(tr.get('learning_rate_start', 1e-4))
     lr_end               = float(tr.get('learning_rate_end', 1e-6))
-    lr_reduce_factor     = float(tr.get('lr_reduce_factor', 0.5))
-    lr_reduce_patience   = int(tr.get('lr_reduce_patience', 10))
+
     n_active_window      = int(tr.get('n_active_window', 10))
     checkpoint_dir       = cfg.checkpoint_dir
 
@@ -345,6 +350,10 @@ def main(cfg: DictConfig):
 
     state_path       = os.path.join(checkpoint_dir, 'online_state.json')
     patience_counter = 0
+    epochs_done      = 0
+
+    cosine_T_max = total_epochs if total_epochs is not None else max_rounds * epochs_per_round
+    scheduler = CosineAnnealingLR(optimizer, T_max=cosine_T_max, eta_min=lr_end)
 
     log.info(f"Initialised final schedule with sigma_T = {sigma_T:.6f}")
 
@@ -364,14 +373,26 @@ def main(cfg: DictConfig):
         return window
 
     # -----------------------------------------------------------------------
-    for round_idx in range(max_rounds):
+    round_idx = 0
+    while True:
+        # Stopping condition: epoch budget or round cap
+        if total_epochs is not None and epochs_done >= total_epochs:
+            log.info(f"Epoch budget ({total_epochs}) reached. Online algorithm complete.")
+            break
+        if total_epochs is None and round_idx >= max_rounds:
+            log.info(f"Round cap ({max_rounds}) reached. Online algorithm complete.")
+            break
 
         window_mask   = get_window_mask()
         active_sigmas = all_sigmas[window_mask]  # low→high window of K levels
         n_active      = active_sigmas.shape[0]
 
+        budget_str = (
+            f"epochs {epochs_done}/{total_epochs}" if total_epochs is not None
+            else f"round {round_idx + 1}/{max_rounds}"
+        )
         log.info(
-            f"\n=== Round {round_idx + 1}/{max_rounds}  |  "
+            f"\n=== Round {round_idx + 1}  [{budget_str}]  |  "
             f"active window: {n_active}  |  "
             f"final schedule length: {len(final_schedule)}  |  "
             f"frontier: {frontier:.6f} ==="
@@ -384,15 +405,8 @@ def main(cfg: DictConfig):
         # Effective epoch count grows with each round
         effective_epochs = epochs_per_round + round_idx * epoch_increase_per_round
 
-        # Update model schedule and reset LR for this round
+        # Update model schedule for this round
         model.compute_schedule_variables(active_sigmas.to(device))
-        for pg in optimizer.param_groups:
-            pg['lr'] = lr_start
-        scheduler = ReduceLROnPlateau(
-            optimizer, mode='min',
-            factor=lr_reduce_factor, patience=lr_reduce_patience,
-            min_lr=lr_end,
-        )
 
         def _eval_and_prune(label):
             """Evaluate B^2S from pass_frontier, prune intermediate levels, and
@@ -411,7 +425,8 @@ def main(cfg: DictConfig):
                     continue
                 feasible = ratio <= tau
                 log.info(
-                    f"    sigma={sv:.5f}  B^2S={ratio:.4f}  E_clean={clean:.3e}  "
+                    f"    sigma={sv:.5f}  B^2S={ratio:.4f}  "
+                    f"E_2step={ratio * clean:.3e}  E_clean={clean:.3e}  "
                     f"{'FEASIBLE' if feasible else f'ratio={ratio:.3f}'}"
                 )
                 if feasible and sigma_next_val is None:
@@ -434,15 +449,16 @@ def main(cfg: DictConfig):
                 f"{sigma_next_val:.6f} and {pass_frontier:.6f}."
             )
             best_candidate = sigma_next_val
-            scheduler.num_bad_epochs = 0  # reset plateau patience on discovery
             # Recompute training window (frontier unchanged; best_candidate is now
             # the closest level below pass_frontier in the exploration mask)
             model.compute_schedule_variables(all_sigmas[get_window_mask()].to(device))
 
         # ---- Train for effective_epochs epochs, with optional mid-round evals ----
+        epochs_this_round = 0
         for epoch in range(effective_epochs):
             loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-            scheduler.step(loss)
+            scheduler.step()
+            epochs_this_round += 1
             current_lr = optimizer.param_groups[0]['lr']
             if (epoch + 1) % 10 == 0:
                 log.info(
@@ -450,29 +466,59 @@ def main(cfg: DictConfig):
                     f"loss={loss:.6f}  lr={current_lr:.2e}"
                 )
 
-            is_last_epoch = (epoch + 1) == effective_epochs
+            budget_hit = (total_epochs is not None
+                          and epochs_done + epochs_this_round >= total_epochs)
+            is_last_epoch = (epoch + 1) == effective_epochs or budget_hit
             do_mid_eval   = (eval_every_epoch > 0
                              and (epoch + 1) % eval_every_epoch == 0
                              and not is_last_epoch)
             if do_mid_eval:
                 _eval_and_prune(f"mid-round epoch {epoch + 1}")
 
+            if budget_hit:
+                log.info(
+                    f"  Epoch budget ({total_epochs}) reached after epoch {epoch + 1} "
+                    f"of round. Stopping round early."
+                )
+                break
+
         # ---- End-of-round eval ----
         _eval_and_prune("end-of-round")
 
-        # ---- Inference bias over the current final schedule ----
-        inf_bias_ratio = float('nan')
-        inf_clean_mse  = float('nan')
-        if len(final_schedule) >= 2:
+        # ---- Per-level clean and inference errors over the current final schedule ----
+        per_level_sigmas    = []
+        per_level_clean     = []
+        per_level_inference = []
+        inf_bias_ratio      = float('nan')
+        inf_clean_mse       = float('nan')
+        if len(final_schedule) >= 1:
             fs_lohi = torch.tensor(sorted(final_schedule), dtype=torch.float32)
-            inf_bias_ratio, inf_clean_mse = compute_inference_bias(
+            per_level_sigmas, per_level_clean, per_level_inference = compute_per_level_errors(
                 model, val_loader, device, fs_lohi, n_batches=n_eval_batches,
             )
-            # Restore the training window schedule after inference eval
+            # Restore the training window schedule after eval
             model.compute_schedule_variables(all_sigmas[get_window_mask()].to(device))
+
             log.info(
-                f"  Inference bias: ratio={inf_bias_ratio:.4f}  "
-                f"E_clean(frontier)={inf_clean_mse:.3e}  "
+                f"  Per-level errors (final schedule, {len(per_level_sigmas)} steps):"
+            )
+            for sigma, c_mse, i_mse in zip(per_level_sigmas, per_level_clean, per_level_inference):
+                if not np.isnan(c_mse) and c_mse > 0:
+                    ratio_str = f"{i_mse / c_mse:.4f}"
+                else:
+                    ratio_str = "N/A"
+                log.info(
+                    f"    sigma={sigma:.6f}  E_clean={c_mse:.3e}  "
+                    f"E_inf={i_mse:.3e}  ratio={ratio_str}"
+                )
+
+            # Aggregate: frontier is the lowest level (index 0)
+            if not np.isnan(per_level_clean[0]) and per_level_clean[0] > 0:
+                inf_bias_ratio = per_level_inference[0] / per_level_clean[0]
+                inf_clean_mse  = per_level_clean[0]
+            log.info(
+                f"  Inference bias (frontier): ratio={inf_bias_ratio:.4f}  "
+                f"E_clean={inf_clean_mse:.3e}  "
                 f"(schedule steps={len(final_schedule)})"
             )
 
@@ -495,19 +541,26 @@ def main(cfg: DictConfig):
                 f"({patience_counter}/{patience_limit})."
             )
 
+        epochs_done += epochs_this_round
+        round_idx   += 1
+
         # Save model checkpoint and state after every round
-        ckpt_path = os.path.join(checkpoint_dir, f'checkpoint_round_{round_idx + 1}.pth')
+        ckpt_path = os.path.join(checkpoint_dir, f'checkpoint_round_{round_idx}.pth')
         torch.save(model.state_dict(), ckpt_path)
 
         state = {
-            'round'            : round_idx + 1,
-            'final_schedule'   : final_schedule,
-            'frontier'         : frontier,
-            'n_active'         : int(exploration_mask.sum().item()),
-            'patience_counter' : patience_counter,
-            'last_checkpoint'  : ckpt_path,
-            'inference_bias'   : inf_bias_ratio,
-            'inference_clean'  : inf_clean_mse,
+            'round'               : round_idx,
+            'epochs_done'         : epochs_done,
+            'final_schedule'      : final_schedule,
+            'frontier'            : frontier,
+            'n_active'            : int(exploration_mask.sum().item()),
+            'patience_counter'    : patience_counter,
+            'last_checkpoint'     : ckpt_path,
+            'inference_bias'      : inf_bias_ratio,
+            'inference_clean'     : inf_clean_mse,
+            'per_level_sigmas'    : per_level_sigmas,
+            'per_level_clean_mse' : per_level_clean,
+            'per_level_inf_mse'   : per_level_inference,
         }
         with open(state_path, 'w') as f:
             json.dump(state, f, indent=2)

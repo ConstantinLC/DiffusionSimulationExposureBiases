@@ -6,10 +6,10 @@
 # Usage:
 #   python train_algorithm_online.py +experiment=ks_online
 defaults:
-  - override /dataset: ks
+  - override /dataset: kolwbmogorov
   - override /model: diffusion
 
-checkpoint_dir: ./checkpoints/KuramotoSivashinsky/online
+checkpoint_dir: ./checkpoints/WeatherBench/online
 
 data:
   prediction_steps: 1
@@ -28,13 +28,13 @@ training:
   log_sigma_min: -3.0
   log_sigma_max: -0.0001
   n_exploration_levels: 30
-  epochs_per_round: 100
-  epoch_increase_per_round: 100
-  total_epochs: 1000
-  eval_every_epoch: 20
+  epochs_per_round: 10
+  epoch_increase_per_round: 10
+  total_epochs: 100
+  eval_every_epoch: 2
   exploration_patience: 5
   n_eval_batches: 30
   n_noise_samples: 4
   learning_rate_start: 1.0e-4
-  learning_rate_end: 1.0e-6
+  learning_rate_end: 1.0e-4
   n_active_window: 5
